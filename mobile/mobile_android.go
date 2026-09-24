@@ -102,25 +102,26 @@ func (h callbackChallengeHandler) HandleExternalLogin(challenge authchallenge.Ex
 }
 
 type mobileConfig struct {
-	Protocol                string `json:"protocol"`
-	Server                  string `json:"server"`
-	Port                    int    `json:"port"`
-	Username                string `json:"username"`
-	Password                string `json:"password"`
-	TOTPSecret              string `json:"totpSecret"`
-	AuthType                string `json:"authType"`
-	LoginDomain             string `json:"loginDomain"`
-	Phone                   string `json:"phone"`
-	ClientData              string `json:"clientData"`
-	SocksBind               string `json:"socksBind"`
-	HTTPBind                string `json:"httpBind"`
-	RemoteDNS               string `json:"remoteDns"`
-	SecondaryDNS            string `json:"secondaryDns"`
-	ProxyAll                bool   `json:"proxyAll"`
-	DisableConfig           bool   `json:"disableServerConfig"`
-	DNSTTL                  int    `json:"dnsTtl"`
-	UpdateBestNodesInterval int    `json:"updateBestNodesInterval"`
-	SessionRefreshInterval  int    `json:"sessionRefreshInterval"`
+	Protocol                string            `json:"protocol"`
+	Server                  string            `json:"server"`
+	Port                    int               `json:"port"`
+	Username                string            `json:"username"`
+	Password                string            `json:"password"`
+	TOTPSecret              string            `json:"totpSecret"`
+	AuthType                string            `json:"authType"`
+	LoginDomain             string            `json:"loginDomain"`
+	Phone                   string            `json:"phone"`
+	ClientData              string            `json:"clientData"`
+	SocksBind               string            `json:"socksBind"`
+	HTTPBind                string            `json:"httpBind"`
+	RemoteDNS               string            `json:"remoteDns"`
+	SecondaryDNS            string            `json:"secondaryDns"`
+	ProxyAll                bool              `json:"proxyAll"`
+	DisableConfig           bool              `json:"disableServerConfig"`
+	DNSTTL                  int               `json:"dnsTtl"`
+	UpdateBestNodesInterval int               `json:"updateBestNodesInterval"`
+	SessionRefreshInterval  int               `json:"sessionRefreshInterval"`
+	CustomDNS               map[string]string `json:"customDns"`
 }
 
 type mobileResult struct {
@@ -530,6 +531,15 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
 	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
+	for domain, address := range config.CustomDNS {
+		ip := net.ParseIP(address)
+		if ip == nil {
+			log.Printf("ignore invalid custom DNS: %s=%s", domain, address)
+			continue
+		}
+		resolver.SetPermanentDNS(domain, ip)
+		log.Printf("custom DNS: %s -> %s", domain, ip)
+	}
 	stack.SetupResolve(service.NewDnsServer(resolver, []string{remoteDNS, secondaryDNS}))
 	stack.SetupIPPool(resolver.IPPool)
 	s.gvisor = stack
