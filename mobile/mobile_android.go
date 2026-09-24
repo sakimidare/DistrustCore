@@ -123,7 +123,7 @@ var activeSession *mobileSession
 
 // Capabilities reports only features implemented by this mobile binding.
 func Capabilities() string {
-	return `{"apiVersion":2,"easyConnectVpn":true,"aTrustPasswordVpn":true,"localSocks5":true,"localHttp":true,"interactiveAuth":false}`
+	return `{"apiVersion":2,"easyConnectVpn":true,"aTrustVpn":true,"localSocks5":true,"localHttp":true,"interactiveAuth":true,"clickCaptcha":false}`
 }
 
 // Prepare negotiates a VPN session and returns addresses, routes and DNS as JSON.
