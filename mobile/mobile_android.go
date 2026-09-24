@@ -403,6 +403,9 @@ func parseConfig(value string) (mobileConfig, error) {
 
 func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSession, mobileResult, error) {
 	log.Init()
+	atrustclient.SetEmbeddedMode(func(err error) {
+		log.Printf("session-expired event: %v", err)
+	})
 	// Android shares this process with the UI, so a failing data plane must be
 	// reported instead of aborting the application.
 	gvisor.SetMobileMode(func(err error) {

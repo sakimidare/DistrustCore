@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/mythologyli/zju-connect/client/atrust/auth"
@@ -39,7 +40,17 @@ func (c *Client) startSessionRefresh(refresh func(context.Context) (auth.LoginRe
 				return
 			}
 			if errors.Is(err, auth.ErrSessionInvalid) {
-				log.Fatalf("aTrust session maintenance failed: %v", err)
+				expiredErr := fmt.Errorf("aTrust session maintenance failed: %w", err)
+				if handleSessionInvalid(expiredErr) {
+					c.setSessionSID("", expiredErr)
+					c.l3TunnelMu.Lock()
+					tunnel := c.l3Tunnel
+					c.l3TunnelMu.Unlock()
+					if tunnel != nil {
+						tunnel.Close()
+					}
+					return
+				}
 			}
 			if err != nil {
 				log.Printf("aTrust authConfig refresh failed: %v", err)

@@ -168,7 +168,10 @@ func parseTCPTunnelAuthResponse(data string) error {
 	}
 	if response.Code != 0 {
 		if response.Code == 10000004 || response.Code == 75500002 {
-			log.Fatalf("tcp tunnel: aTrust session is invalid (code %d): %s", response.Code, response.Message)
+			err := sessionInvalidError("tcp tunnel", response.Code, response.Message)
+			if handleSessionInvalid(err) {
+				return err
+			}
 		}
 		return fmt.Errorf("tcp tunnel authentication failed (code %d): %s", response.Code, response.Message)
 	}
