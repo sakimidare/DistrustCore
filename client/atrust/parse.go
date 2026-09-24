@@ -1,6 +1,7 @@
 package atrust
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"strconv"
@@ -88,6 +89,14 @@ func resourceAddrPretend(value any) bool {
 
 func (c *Client) parseResource(resource []byte) error {
 	log.Println("Parsing resource...")
+	for _, marker := range []string{
+		"newxk.urp.seu.edu.cn",
+		"urp.seu.edu.cn",
+		"121.194.14.158",
+		"121.248.58.121",
+	} {
+		log.Printf("raw-resource marker=%s present=%t", marker, bytes.Contains(bytes.ToLower(resource), []byte(strings.ToLower(marker))))
+	}
 
 	var clientResource ClientResource
 	err := json.Unmarshal(resource, &clientResource)
@@ -103,7 +112,17 @@ func (c *Client) parseResource(resource []byte) error {
 	for _, app := range clientResource.Data.AppList.Data.AppInfo {
 		for _, appItem := range app.Apps {
 			if appItem.AccessModel != "L3VPN" {
-				log.DebugPrintf("Ignore unsupported aTrust access model %q for app %s", appItem.AccessModel, appItem.ID)
+				hosts := make([]string, 0, len(appItem.AddressList))
+				for _, address := range appItem.AddressList {
+					hosts = append(hosts, address.Host)
+				}
+				log.Printf(
+					"unsupported-resource accessModel=%q appId=%s nodeGroup=%s addresses=%s",
+					appItem.AccessModel,
+					appItem.ID,
+					appItem.NodeGroupID,
+					strings.Join(hosts, ","),
+				)
 				continue
 			}
 			for _, address := range appItem.AddressList {
