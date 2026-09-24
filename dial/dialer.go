@@ -165,10 +165,17 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 		if network == "tcp" {
 			log.Printf("flow=%d decision=VPN target=%s network=tcp host=%s", flowID, ipAddr, hostAddr)
 
-			return d.stack.DialTCP(ctx, &net.TCPAddr{
+			conn, dialErr := d.stack.DialTCP(ctx, &net.TCPAddr{
 				IP:   target.IP,
 				Port: port,
 			})
+			if dialErr == nil {
+				if host, ok := ctx.Value(resolve.ContextKeyResolveHost).(string); ok {
+					d.resolver.RecordSuccessfulAddress(host, target.IP)
+					log.Printf("flow=%d learned successful mapping host=%s ip=%s", flowID, host, target.IP)
+				}
+			}
+			return conn, dialErr
 		} else if network == "udp" {
 			log.Printf("flow=%d decision=VPN target=%s network=udp host=%s", flowID, ipAddr, hostAddr)
 

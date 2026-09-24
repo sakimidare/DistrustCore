@@ -39,6 +39,8 @@ type LogCallback interface {
 
 type DNSCallback interface {
 	Resolve(host string) string
+	LookupHistory(host string) string
+	RecordSuccess(host string, address string)
 }
 
 type callbackLogWriter struct{ callback LogCallback }
@@ -564,6 +566,23 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 				return nil, fmt.Errorf("Android system DNS returned no IPv4 address")
 			}
 			return ips, nil
+		})
+		resolver.SetHistoryLookup(func(host string) []net.IP {
+			value := hostDNSCallback.LookupHistory(host)
+			var addresses []string
+			if err := json.Unmarshal([]byte(value), &addresses); err != nil {
+				return nil
+			}
+			ips := make([]net.IP, 0, len(addresses))
+			for _, address := range addresses {
+				if ip := net.ParseIP(address); ip != nil {
+					ips = append(ips, ip)
+				}
+			}
+			return ips
+		})
+		resolver.SetSuccessRecorder(func(host string, ip net.IP) {
+			hostDNSCallback.RecordSuccess(host, ip.String())
 		})
 	}
 	if ipSet, ipSetErr := s.client.IPSet(); ipSetErr == nil && ipSet != nil {

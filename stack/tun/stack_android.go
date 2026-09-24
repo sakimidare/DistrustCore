@@ -81,6 +81,10 @@ func (s *Stack) RunWithError() error {
 
 			n, err = s.l3Conn.Write(buf[:n])
 			if err != nil {
+				if errors.Is(err, client.ErrResourceNotFound) {
+					log.Printf("Android TUN dropped unsupported destination without stopping VPN: %v", err)
+					continue
+				}
 				errCh <- fmt.Errorf("write VPN server: %w", err)
 				return
 			}

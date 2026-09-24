@@ -26,6 +26,8 @@ type Resolver struct {
 	dnsResourceCursor sync.Map
 	useRemoteDNS      bool
 	externalLookup    func(context.Context, string) ([]net.IP, error)
+	historyLookup     func(string) []net.IP
+	successRecorder   func(string, net.IP)
 	preferredIP       func(net.IP) bool
 
 	dnsCache *cache.Cache
@@ -155,6 +157,24 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 	}
 
 	candidates := make([]net.IP, 0, 4)
+	if r.historyLookup != nil {
+		history := r.historyLookup(host)
+		for _, ip := range history {
+			candidates = appendUniqueIPs(candidates, ip)
+		}
+		if len(history) > 0 {
+			log.Printf("flow=%d dns history host=%s answers=%v", flowID, host, history)
+			if r.preferredIP != nil {
+				for _, candidate := range history {
+					if r.preferredIP(candidate) {
+						r.setDNSCache(host, candidate)
+						log.Printf("flow=%d dns selected resource-matching history host=%s answer=%s", flowID, host, candidate)
+						return ctx, candidate, nil
+					}
+				}
+			}
+		}
+	}
 	if r.useRemoteDNS {
 		ip, err := r.resolveCoordinated(ctx, host, func(lookupCtx context.Context) (net.IP, error) {
 			return r.resolveRemote(lookupCtx, host)
@@ -215,6 +235,21 @@ func (r *Resolver) SetExternalLookup(lookup func(context.Context, string) ([]net
 
 func (r *Resolver) SetPreferredIP(match func(net.IP) bool) {
 	r.preferredIP = match
+}
+
+func (r *Resolver) SetHistoryLookup(lookup func(string) []net.IP) {
+	r.historyLookup = lookup
+}
+
+func (r *Resolver) SetSuccessRecorder(record func(string, net.IP)) {
+	r.successRecorder = record
+}
+
+func (r *Resolver) RecordSuccessfulAddress(host string, ip net.IP) {
+	if r.successRecorder == nil || host == "" || ip == nil {
+		return
+	}
+	r.successRecorder(normalizeHostname(host), ip)
 }
 
 func (r *Resolver) resolveCoordinated(ctx context.Context, host string, lookup func(context.Context) (net.IP, error)) (net.IP, error) {
