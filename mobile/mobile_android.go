@@ -279,28 +279,32 @@ func DebugLogin(server string, username string, password string) string {
 	return Login(server, username, password)
 }
 
-func StartStack(fd int) {
+func StartStack(fd int) string {
 	sessionMu.Lock()
 	sess := activeSession
 	sessionMu.Unlock()
 	if sess == nil || sess.client == nil {
-		return
+		return failure("no_active_session", fmt.Errorf("no active session"))
 	}
 	stack, err := tun.NewStack(sess.client, false, false, nil)
 	if err != nil {
 		log.Printf("create Android TUN stack: %v", err)
-		return
+		return failure("tun_start_failed", err)
 	}
 	stack.SetupTun(fd)
 	sess.mu.Lock()
 	sess.tunStack = stack
 	sess.mu.Unlock()
-	stack.Run()
+	runErr := stack.RunWithError()
 	sess.mu.Lock()
 	if sess.tunStack == stack {
 		sess.tunStack = nil
 	}
 	sess.mu.Unlock()
+	if runErr != nil {
+		return failure("tun_stopped", runErr)
+	}
+	return encodeResult(mobileResult{OK: true})
 }
 
 func Logout() { Stop() }

@@ -1,6 +1,8 @@
 package tun
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -25,18 +27,25 @@ type Stack struct {
 }
 
 func (s *Stack) Run() {
+	if err := s.RunWithError(); err != nil {
+		log.Printf("Android TUN stack stopped: %v", err)
+	}
+}
+
+func (s *Stack) RunWithError() error {
 	var connErr error
 	s.l3Conn, connErr = s.endpoint.client.NewL3Conn()
 	if connErr != nil {
-		return
+		return fmt.Errorf("create L3 connection: %w", connErr)
 	}
+	errCh := make(chan error, 2)
 	// Read from VPN server and send to TUN stack
 	go func() {
 		buf := make([]byte, maxInboundPacketSize)
 		for {
 			n, err := s.l3Conn.Read(buf)
 			if err != nil {
-				log.Printf("Error occurred while reading from VPN server: %v", err)
+				errCh <- fmt.Errorf("read VPN server: %w", err)
 				return
 			}
 			log.DebugPrintf("Recv: read %d bytes", n)
@@ -44,39 +53,49 @@ func (s *Stack) Run() {
 
 			err = s.endpoint.Write(buf[:n])
 			if err != nil {
-				log.Printf("Error occurred while writing to TUN stack: %v", err)
+				errCh <- fmt.Errorf("write TUN: %w", err)
 				return
 			}
 		}
 	}()
 
 	// Read from TUN stack and send to VPN server
-	buf := make([]byte, MTU)
-	for {
-		n, err := s.endpoint.Read(buf)
-		if err != nil {
-			log.Printf("Error occurred while reading from TUN stack: %v", err)
-			return
-		}
+	go func() {
+		buf := make([]byte, MTU)
+		for {
+			n, err := s.endpoint.Read(buf)
+			if err != nil {
+				errCh <- fmt.Errorf("read TUN: %w", err)
+				return
+			}
 
-		header, err := ipv4.ParseHeader(buf[:n])
-		if err != nil {
-			continue
-		}
+			header, err := ipv4.ParseHeader(buf[:n])
+			if err != nil {
+				continue
+			}
 
-		// Filter out non-TCP/UDP packets otherwise error may occur
-		if header.Protocol != syscall.IPPROTO_TCP && header.Protocol != syscall.IPPROTO_UDP {
-			continue
-		}
+			// Filter out non-TCP/UDP packets otherwise error may occur
+			if header.Protocol != syscall.IPPROTO_TCP && header.Protocol != syscall.IPPROTO_UDP {
+				continue
+			}
 
-		n, err = s.l3Conn.Write(buf[:n])
-		if err != nil {
-			log.Printf("Error occurred while writing to VPN server: %v", err)
-			return
+			n, err = s.l3Conn.Write(buf[:n])
+			if err != nil {
+				errCh <- fmt.Errorf("write VPN server: %w", err)
+				return
+			}
+			log.DebugPrintf("Send: wrote %d bytes", n)
+			log.DebugDumpHex(buf[:n])
 		}
-		log.DebugPrintf("Send: wrote %d bytes", n)
-		log.DebugDumpHex(buf[:n])
+	}()
+
+	err := <-errCh
+	intentionalClose := s.closed.Load()
+	s.Close()
+	if intentionalClose || errors.Is(err, os.ErrClosed) {
+		return nil
 	}
+	return err
 }
 
 // Close releases both ends owned by the Android stack. The TUN descriptor is
