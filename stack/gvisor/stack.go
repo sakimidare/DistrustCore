@@ -113,6 +113,9 @@ func (ep *Endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error)
 				// is strictly better than panicking with a gvisor stack
 				// trace, which obscures the actual cause.
 				if errors.Is(err, easyconnect.ErrSangforShutdown) {
+					if mobileFatal(err) {
+						return list.Len(), nil
+					}
 					log.Printf("WritePackets: server SHUTDOWN; running cleanup hooks and exiting for clean restart")
 					if !hook_func.IsTerminal() {
 						hook_func.ExecTerminalFunc(context.Background())
@@ -120,7 +123,7 @@ func (ep *Endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error)
 					os.Exit(2)
 				}
 
-				if hook_func.IsTerminal() {
+				if hook_func.IsTerminal() || mobileFatal(err) {
 					return list.Len(), nil
 				} else {
 					panic(err)
@@ -233,6 +236,9 @@ func (s *Stack) Run() {
 	var connErr error
 	s.endpoint.l3Conn, connErr = s.endpoint.client.NewL3Conn()
 	if connErr != nil {
+		if mobileFatal(connErr) {
+			return
+		}
 		panic(connErr)
 	}
 	// Read from VPN server and send to gVisor stack
@@ -240,7 +246,7 @@ func (s *Stack) Run() {
 	for {
 		n, err := s.endpoint.l3Conn.Read(buf)
 		if err != nil {
-			if s.closed.Load() || hook_func.IsTerminal() {
+			if s.closed.Load() || hook_func.IsTerminal() || mobileFatal(err) {
 				return
 			} else {
 				panic(err)

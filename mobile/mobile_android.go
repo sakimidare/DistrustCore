@@ -100,18 +100,19 @@ type mobileConfig struct {
 }
 
 type mobileResult struct {
-	OK           bool            `json:"ok"`
-	ErrorCode    string          `json:"errorCode,omitempty"`
-	ErrorMessage string          `json:"errorMessage,omitempty"`
-	Address      string          `json:"address,omitempty"`
-	PrefixLength int             `json:"prefixLength,omitempty"`
-	MTU          int             `json:"mtu,omitempty"`
-	Routes       []string        `json:"routes,omitempty"`
-	DNSServers   []string        `json:"dnsServers,omitempty"`
-	SocksAddress string          `json:"socksAddress,omitempty"`
-	HTTPAddress  string          `json:"httpAddress,omitempty"`
-	ClientData   string          `json:"clientData,omitempty"`
-	AuthMethods  []auth.AuthInfo `json:"authMethods,omitempty"`
+	OK              bool            `json:"ok"`
+	ErrorCode       string          `json:"errorCode,omitempty"`
+	ErrorMessage    string          `json:"errorMessage,omitempty"`
+	Address         string          `json:"address,omitempty"`
+	PrefixLength    int             `json:"prefixLength,omitempty"`
+	MTU             int             `json:"mtu,omitempty"`
+	Routes          []string        `json:"routes,omitempty"`
+	DNSServers      []string        `json:"dnsServers,omitempty"`
+	SocksAddress    string          `json:"socksAddress,omitempty"`
+	HTTPAddress     string          `json:"httpAddress,omitempty"`
+	ClientData      string          `json:"clientData,omitempty"`
+	AuthMethods     []auth.AuthInfo `json:"authMethods,omitempty"`
+	DomainResources []string        `json:"domainResources,omitempty"`
 }
 
 type mobileSession struct {
@@ -120,6 +121,8 @@ type mobileSession struct {
 	gvisor   *gvisor.Stack
 	resolver *resolve.Resolver
 	servers  []io.Closer
+	tunStack *tun.Stack
+	mu       sync.Mutex
 }
 
 var sessionMu sync.Mutex
@@ -235,7 +238,15 @@ func StartStack(fd int) {
 		return
 	}
 	stack.SetupTun(fd)
+	sess.mu.Lock()
+	sess.tunStack = stack
+	sess.mu.Unlock()
 	stack.Run()
+	sess.mu.Lock()
+	if sess.tunStack == stack {
+		sess.tunStack = nil
+	}
+	sess.mu.Unlock()
 }
 
 func Logout() { Stop() }
@@ -281,6 +292,11 @@ func parseConfig(value string) (mobileConfig, error) {
 
 func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSession, mobileResult, error) {
 	log.Init()
+	// Android shares this process with the UI, so a failing data plane must be
+	// reported instead of aborting the application.
+	gvisor.SetMobileMode(func(err error) {
+		log.Printf("stack fatal error: %v", err)
+	})
 	underlayDialer, err := underlay.New(underlay.Options{AutoDetect: false})
 	if err != nil {
 		return nil, mobileResult{}, err
@@ -367,6 +383,11 @@ func negotiatedResult(vpnClient client.Client) (mobileResult, error) {
 		}
 	}
 	result.DNSServers, _ = vpnClient.DNSServers()
+	if domains, domainErr := vpnClient.DomainResources(); domainErr == nil {
+		for domain := range domains {
+			result.DomainResources = append(result.DomainResources, domain)
+		}
+	}
 	return result, nil
 }
 
@@ -418,6 +439,13 @@ func (s *mobileSession) close() {
 	}
 	if s.gvisor != nil {
 		s.gvisor.Close()
+	}
+	s.mu.Lock()
+	activeTunStack := s.tunStack
+	s.tunStack = nil
+	s.mu.Unlock()
+	if activeTunStack != nil {
+		activeTunStack.Close()
 	}
 	if closer, ok := s.client.(interface{ Close() }); ok {
 		closer.Close()

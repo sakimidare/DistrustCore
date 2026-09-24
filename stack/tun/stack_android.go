@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/mythologyli/zju-connect/client"
@@ -20,6 +21,7 @@ const maxInboundPacketSize = 1500
 type Stack struct {
 	endpoint *Endpoint
 	l3Conn   io.ReadWriteCloser
+	closed   atomic.Bool
 }
 
 func (s *Stack) Run() {
@@ -74,6 +76,20 @@ func (s *Stack) Run() {
 		}
 		log.DebugPrintf("Send: wrote %d bytes", n)
 		log.DebugDumpHex(buf[:n])
+	}
+}
+
+// Close releases both ends owned by the Android stack. The TUN descriptor is
+// transferred to Go by the caller and must have exactly one owner.
+func (s *Stack) Close() {
+	if s.closed.Swap(true) {
+		return
+	}
+	if s.endpoint != nil && s.endpoint.readWriteCloser != nil {
+		_ = s.endpoint.readWriteCloser.Close()
+	}
+	if s.l3Conn != nil {
+		_ = s.l3Conn.Close()
 	}
 }
 
