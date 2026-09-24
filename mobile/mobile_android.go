@@ -78,36 +78,40 @@ func (h callbackChallengeHandler) HandleExternalLogin(challenge authchallenge.Ex
 }
 
 type mobileConfig struct {
-	Protocol      string `json:"protocol"`
-	Server        string `json:"server"`
-	Port          int    `json:"port"`
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	TOTPSecret    string `json:"totpSecret"`
-	AuthType      string `json:"authType"`
-	LoginDomain   string `json:"loginDomain"`
-	Phone         string `json:"phone"`
-	ClientData    string `json:"clientData"`
-	SocksBind     string `json:"socksBind"`
-	HTTPBind      string `json:"httpBind"`
-	RemoteDNS     string `json:"remoteDns"`
-	SecondaryDNS  string `json:"secondaryDns"`
-	ProxyAll      bool   `json:"proxyAll"`
-	DisableConfig bool   `json:"disableServerConfig"`
+	Protocol                string `json:"protocol"`
+	Server                  string `json:"server"`
+	Port                    int    `json:"port"`
+	Username                string `json:"username"`
+	Password                string `json:"password"`
+	TOTPSecret              string `json:"totpSecret"`
+	AuthType                string `json:"authType"`
+	LoginDomain             string `json:"loginDomain"`
+	Phone                   string `json:"phone"`
+	ClientData              string `json:"clientData"`
+	SocksBind               string `json:"socksBind"`
+	HTTPBind                string `json:"httpBind"`
+	RemoteDNS               string `json:"remoteDns"`
+	SecondaryDNS            string `json:"secondaryDns"`
+	ProxyAll                bool   `json:"proxyAll"`
+	DisableConfig           bool   `json:"disableServerConfig"`
+	DNSTTL                  int    `json:"dnsTtl"`
+	UpdateBestNodesInterval int    `json:"updateBestNodesInterval"`
+	SessionRefreshInterval  int    `json:"sessionRefreshInterval"`
 }
 
 type mobileResult struct {
-	OK           bool     `json:"ok"`
-	ErrorCode    string   `json:"errorCode,omitempty"`
-	ErrorMessage string   `json:"errorMessage,omitempty"`
-	Address      string   `json:"address,omitempty"`
-	PrefixLength int      `json:"prefixLength,omitempty"`
-	MTU          int      `json:"mtu,omitempty"`
-	Routes       []string `json:"routes,omitempty"`
-	DNSServers   []string `json:"dnsServers,omitempty"`
-	SocksAddress string   `json:"socksAddress,omitempty"`
-	HTTPAddress  string   `json:"httpAddress,omitempty"`
-	ClientData   string   `json:"clientData,omitempty"`
+	OK           bool            `json:"ok"`
+	ErrorCode    string          `json:"errorCode,omitempty"`
+	ErrorMessage string          `json:"errorMessage,omitempty"`
+	Address      string          `json:"address,omitempty"`
+	PrefixLength int             `json:"prefixLength,omitempty"`
+	MTU          int             `json:"mtu,omitempty"`
+	Routes       []string        `json:"routes,omitempty"`
+	DNSServers   []string        `json:"dnsServers,omitempty"`
+	SocksAddress string          `json:"socksAddress,omitempty"`
+	HTTPAddress  string          `json:"httpAddress,omitempty"`
+	ClientData   string          `json:"clientData,omitempty"`
+	AuthMethods  []auth.AuthInfo `json:"authMethods,omitempty"`
 }
 
 type mobileSession struct {
@@ -124,6 +128,22 @@ var activeSession *mobileSession
 // Capabilities reports only features implemented by this mobile binding.
 func Capabilities() string {
 	return `{"apiVersion":2,"easyConnectVpn":true,"aTrustVpn":true,"localSocks5":true,"localHttp":true,"interactiveAuth":true,"clickCaptcha":false}`
+}
+
+// FetchAuthMethods asks an aTrust server for its advertised authentication
+// domains and methods without starting a VPN session.
+func FetchAuthMethods(server string, port int) string {
+	if strings.TrimSpace(server) == "" {
+		return failure("invalid_config", fmt.Errorf("server is required"))
+	}
+	if port == 0 {
+		port = 443
+	}
+	methods, err := atrustclient.GetAuthInfoList(server, port, "", false, "", "")
+	if err != nil {
+		return failure("auth_discovery_failed", err)
+	}
+	return encodeResult(mobileResult{OK: true, AuthMethods: methods})
 }
 
 // Prepare negotiates a VPN session and returns addresses, routes and DNS as JSON.
@@ -247,6 +267,15 @@ func parseConfig(value string) (mobileConfig, error) {
 	if config.RemoteDNS == "" {
 		config.RemoteDNS = "auto"
 	}
+	if config.DNSTTL <= 0 {
+		config.DNSTTL = 3600
+	}
+	if config.UpdateBestNodesInterval < 0 {
+		config.UpdateBestNodesInterval = 300
+	}
+	if config.SessionRefreshInterval < 0 {
+		config.SessionRefreshInterval = 1800
+	}
 	return config, nil
 }
 
@@ -303,8 +332,8 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 			ServerAddress: config.Server, ServerPort: config.Port, LoginMethod: method,
 			TOTPSecret: config.TOTPSecret, ClientData: savedClientData,
 			ChallengeHandler:         challengeHandler,
-			BestNodesRefreshInterval: 5 * time.Minute,
-			SessionRefreshInterval:   30 * time.Minute,
+			BestNodesRefreshInterval: time.Duration(config.UpdateBestNodesInterval) * time.Second,
+			SessionRefreshInterval:   time.Duration(config.SessionRefreshInterval) * time.Second,
 		})
 		if err != nil {
 			vpnClient.Close()
@@ -353,7 +382,7 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 	if err != nil {
 		return err
 	}
-	resolver := resolve.NewResolver(stack, remoteDNS, config.SecondaryDNS, 3600, domainResources, dnsResources, remoteDNS != "")
+	resolver := resolve.NewResolver(stack, remoteDNS, config.SecondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
 	stack.SetupResolve(service.NewDnsServer(resolver, []string{remoteDNS, config.SecondaryDNS}))
 	stack.SetupIPPool(resolver.IPPool)
 	s.gvisor = stack
