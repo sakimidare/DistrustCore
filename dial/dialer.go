@@ -69,6 +69,7 @@ func (d *Dialer) dialDirectHost(ctx context.Context, network, hostAddr string) (
 }
 
 func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Conn, error) {
+	ctx, flowID := resolve.EnsureFlowID(ctx)
 	hostAddr := ""
 	if _, hostAddrOK := ctx.Value(resolve.ContextKeyResolveHost).(string); hostAddrOK {
 		// hostAddr doesn't have port field at now
@@ -82,6 +83,7 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 
 	// If addr is IPv6, use direct connection
 	if len(parts) > 2 {
+		log.Printf("flow=%d decision=DIRECT reason=ipv6 target=%s network=%s", flowID, ipAddr, network)
 		return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 	}
 
@@ -127,6 +129,10 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 			ctx = context.WithValue(ctx, resolve.ContextKeyDomainResource, resource)
 			useVPN = true
 			matchedResource = true
+			log.Printf(
+				"flow=%d matched=DOMAIN appId=%s nodeGroup=%s tcpPrefL3=%t addrPretend=%t",
+				flowID, resource.AppID, resource.NodeGroupID, resource.EnableTCPPrefL3, resource.AddrPretend,
+			)
 		}
 	}
 
@@ -135,6 +141,10 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 			ctx = context.WithValue(ctx, resolve.ContextKeyIPResource, resource)
 			useVPN = true
 			matchedResource = true
+			log.Printf(
+				"flow=%d matched=IP range=%s-%s appId=%s nodeGroup=%s tcpPrefL3=%t",
+				flowID, resource.IPMin, resource.IPMax, resource.AppID, resource.NodeGroupID, resource.EnableTCPPrefL3,
+			)
 		}
 	}
 
@@ -147,20 +157,20 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 	// we have no whitelist to enforce. An empty but non-nil slice still means
 	// resources were parsed and no IP destinations are allowed.
 	if useVPN && !matchedResource && d.ipResources != nil {
-		log.Printf("ACL: refusing %s/%s — not in sangfor IPResources whitelist (would trigger tunnel SHUTDOWN)", ipAddr, network)
+		log.Printf("flow=%d decision=DENY reason=acl target=%s network=%s", flowID, ipAddr, network)
 		return nil, ErrACLDenied
 	}
 
 	if useVPN {
 		if network == "tcp" {
-			log.Printf("%s -> VPN", ipAddr)
+			log.Printf("flow=%d decision=VPN target=%s network=tcp host=%s", flowID, ipAddr, hostAddr)
 
 			return d.stack.DialTCP(ctx, &net.TCPAddr{
 				IP:   target.IP,
 				Port: port,
 			})
 		} else if network == "udp" {
-			log.Printf("%s -> VPN", ipAddr)
+			log.Printf("flow=%d decision=VPN target=%s network=udp host=%s", flowID, ipAddr, hostAddr)
 
 			return d.stack.DialUDP(ctx, &net.UDPAddr{
 				IP:   target.IP,
@@ -171,6 +181,7 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 			return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 		}
 	} else {
+		log.Printf("flow=%d decision=DIRECT target=%s network=%s host=%s", flowID, ipAddr, network, hostAddr)
 		return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 	}
 }
@@ -203,6 +214,8 @@ func matchIPResourceForTunnel(index *ipresource.Index, target net.IP, network st
 }
 
 func (d *Dialer) Dial(ctx context.Context, network string, addr string) (net.Conn, error) {
+	ctx, flowID := resolve.EnsureFlowID(ctx)
+	log.Printf("flow=%d start target=%s network=%s", flowID, addr, network)
 	// If addr is IPv6, use direct connection
 	if strings.Count(addr, ":") > 1 {
 		return d.dialDirectIP(ctx, network, addr, "")

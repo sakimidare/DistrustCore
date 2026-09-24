@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,29 @@ import (
 // a JSON challenge and blocks until the UI returns a JSON response.
 type ChallengeCallback interface {
 	OnChallenge(challengeJSON string) string
+}
+
+type LogCallback interface {
+	OnLog(line string)
+}
+
+type callbackLogWriter struct{ callback LogCallback }
+
+func (w callbackLogWriter) Write(value []byte) (int, error) {
+	if w.callback != nil {
+		w.callback.OnLog(strings.TrimSpace(string(value)))
+	}
+	return len(value), nil
+}
+
+// SetLogCallback mirrors Go core logs into the Android host. Passing nil
+// restores stdout logging.
+func SetLogCallback(callback LogCallback) {
+	if callback == nil {
+		log.SetOutput(nil)
+		return
+	}
+	log.SetOutput(callbackLogWriter{callback: callback})
 }
 
 type callbackChallengeHandler struct{ callback ChallengeCallback }
@@ -123,6 +147,36 @@ type mobileSession struct {
 	servers  []io.Closer
 	tunStack *tun.Stack
 	mu       sync.Mutex
+}
+
+type snapshotIPResource struct {
+	IPMin           string `json:"ipMin"`
+	IPMax           string `json:"ipMax"`
+	PortMin         int    `json:"portMin"`
+	PortMax         int    `json:"portMax"`
+	Protocol        string `json:"protocol"`
+	AppID           string `json:"appId,omitempty"`
+	NodeGroupID     string `json:"nodeGroupId,omitempty"`
+	EnableTCPPrefL3 bool   `json:"enableTcpPrefL3"`
+}
+
+type snapshotDomainResource struct {
+	Domain          string `json:"domain"`
+	PortMin         int    `json:"portMin"`
+	PortMax         int    `json:"portMax"`
+	Protocol        string `json:"protocol"`
+	AppID           string `json:"appId,omitempty"`
+	NodeGroupID     string `json:"nodeGroupId,omitempty"`
+	EnableTCPPrefL3 bool   `json:"enableTcpPrefL3"`
+	AddrPretend     bool   `json:"addrPretend"`
+}
+
+type resourceSnapshot struct {
+	VirtualIP       string                   `json:"virtualIp,omitempty"`
+	DNSServers      []string                 `json:"dnsServers,omitempty"`
+	IPResources     []snapshotIPResource     `json:"ipResources,omitempty"`
+	DomainResources []snapshotDomainResource `json:"domainResources,omitempty"`
+	DNSResources    map[string][]string      `json:"dnsResources,omitempty"`
 }
 
 var sessionMu sync.Mutex
@@ -259,6 +313,59 @@ func Stop() {
 	if sess != nil {
 		sess.close()
 	}
+}
+
+// ResourceSnapshot returns a credential-free view of the active server policy.
+func ResourceSnapshot() string {
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess == nil || sess.client == nil {
+		return failure("no_active_session", fmt.Errorf("no active session"))
+	}
+	snapshot := resourceSnapshot{}
+	if ip, err := sess.client.IP(); err == nil {
+		snapshot.VirtualIP = ip.String()
+	}
+	snapshot.DNSServers, _ = sess.client.DNSServers()
+	if resources, err := sess.client.IPResources(); err == nil {
+		for _, resource := range resources {
+			snapshot.IPResources = append(snapshot.IPResources, snapshotIPResource{
+				IPMin: resource.IPMin.String(), IPMax: resource.IPMax.String(),
+				PortMin: resource.PortMin, PortMax: resource.PortMax, Protocol: resource.Protocol,
+				AppID: resource.AppID, NodeGroupID: resource.NodeGroupID, EnableTCPPrefL3: resource.EnableTCPPrefL3,
+			})
+		}
+	}
+	if domains, err := sess.client.DomainResources(); err == nil {
+		names := make([]string, 0, len(domains))
+		for domain := range domains {
+			names = append(names, domain)
+		}
+		sort.Strings(names)
+		for _, domain := range names {
+			for _, resource := range domains[domain] {
+				snapshot.DomainResources = append(snapshot.DomainResources, snapshotDomainResource{
+					Domain: domain, PortMin: resource.PortMin, PortMax: resource.PortMax, Protocol: resource.Protocol,
+					AppID: resource.AppID, NodeGroupID: resource.NodeGroupID,
+					EnableTCPPrefL3: resource.EnableTCPPrefL3, AddrPretend: resource.AddrPretend,
+				})
+			}
+		}
+	}
+	if dnsResources, err := sess.client.DNSResource(); err == nil {
+		snapshot.DNSResources = make(map[string][]string, len(dnsResources))
+		for domain, ips := range dnsResources {
+			for _, ip := range ips {
+				snapshot.DNSResources[domain] = append(snapshot.DNSResources[domain], ip.String())
+			}
+		}
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return failure("snapshot_failed", err)
+	}
+	return string(data)
 }
 
 func parseConfig(value string) (mobileConfig, error) {

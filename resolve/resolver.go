@@ -71,8 +71,19 @@ var (
 	ContextKeyResolveHost     = contextKey("RESOLVE_HOST")
 	ContextKeyDomainResource  = contextKey("DOMAIN_RESOURCE")
 	ContextKeyIPResource      = contextKey("IP_RESOURCE")
+	ContextKeyFlowID          = contextKey("FLOW_ID")
 	contextKeyIgnoreTCPPrefL3 = contextKey("IGNORE_TCP_PREF_L3")
 )
+
+var nextFlowID atomic.Uint64
+
+func EnsureFlowID(ctx context.Context) (context.Context, uint64) {
+	if existing, ok := ctx.Value(ContextKeyFlowID).(uint64); ok && existing != 0 {
+		return ctx, existing
+	}
+	id := nextFlowID.Add(1)
+	return context.WithValue(ctx, ContextKeyFlowID, id), id
+}
 
 func WithIgnoreTCPPrefL3(ctx context.Context) context.Context {
 	return context.WithValue(ctx, contextKeyIgnoreTCPPrefL3, true)
@@ -95,7 +106,9 @@ func TCPPrefersL3(ctx context.Context) bool {
 
 // Resolve ip address. If the host could be visited via VPN, this function set a DOMAIN_RESOURCE value in context. If resolve success, this function set a RESOLVE_HOST value in context.
 func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Context, resIP net.IP, resErr error) {
+	ctx, flowID := EnsureFlowID(ctx)
 	host = normalizeHostname(host)
+	log.Printf("flow=%d dns query host=%s remote=%t", flowID, host, r.useRemoteDNS)
 	defer func() {
 		if resErr == nil {
 			resCtx = context.WithValue(resCtx, ContextKeyResolveHost, host)
@@ -107,11 +120,11 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 		domainResourceFound = true
 		domainResources = resources
 		ctx = context.WithValue(ctx, ContextKeyDomainResource, resources)
-		log.DebugPrintf("Domain resource found: %s", domain)
+		log.Printf("flow=%d domain-resource matched=%s rules=%d", flowID, domain, len(resources))
 	}
 
 	if cachedIP, found := r.getDNSCache(host); found {
-		log.Printf("%s -> %s", host, cachedIP.String())
+		log.Printf("flow=%d dns cache host=%s answer=%s", flowID, host, cachedIP.String())
 		return ctx, cachedIP, nil
 	}
 
@@ -120,7 +133,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			cursorValue, _ := r.dnsResourceCursor.LoadOrStore(host, &atomic.Uint64{})
 			cursor := cursorValue.(*atomic.Uint64)
 			ip := ips[(cursor.Add(1)-1)%uint64(len(ips))]
-			log.Printf("%s -> %s", host, ip.String())
+			log.Printf("flow=%d dns policy host=%s answer=%s", flowID, host, ip.String())
 			if domainResourceFound {
 				err := r.IPPool.SetIPDomain(ip, host, domainResources)
 				if err != nil {
@@ -133,7 +146,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 		if fakeIPValue := ctx.Value(ContextKeyFakeIP); fakeIPValue != nil {
 			if domainResourceFound {
 				ip := r.IPPool.GenerateIP(host, domainResources)
-				log.Printf("%s -> %s (Fake IP)", host, ip.String())
+				log.Printf("flow=%d dns fake-ip host=%s answer=%s", flowID, host, ip.String())
 				return ctx, ip, nil
 			}
 		}
@@ -150,7 +163,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			log.Printf("Resolve IPv4 addr failed using remote DNS: %s, using secondary DNS instead", host)
 			return r.ResolveWithSecondaryDNS(ctx, host)
 		}
-		log.Printf("%s -> %s", host, ip.String())
+		log.Printf("flow=%d dns remote host=%s answer=%s", flowID, host, ip.String())
 		return ctx, ip, nil
 	} else {
 		return r.ResolveWithSecondaryDNS(ctx, host)

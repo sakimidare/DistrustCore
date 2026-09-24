@@ -14,6 +14,16 @@ func Init() {
 	log.SetOutput(os.Stdout)
 }
 
+// SetOutput redirects all core logs. Mobile hosts use this to mirror Go logs
+// into their native logging and UI pipeline.
+func SetOutput(writer io.Writer) {
+	if writer == nil {
+		log.SetOutput(os.Stdout)
+		return
+	}
+	log.SetOutput(writer)
+}
+
 func EnableDebug() {
 	debug.Store(true)
 }
