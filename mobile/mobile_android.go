@@ -520,9 +520,9 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 	}
 	secondaryDNS := config.SecondaryDNS
 	if secondaryDNS == "" || secondaryDNS == "auto" {
-		if len(policyDNSServers) > 1 {
-			secondaryDNS = policyDNSServers[1]
-		}
+		// This resolver dials directly rather than through the VPN stack. Using
+		// the second policy DNS here would repeat the same failed L3 path.
+		secondaryDNS = "114.114.114.114"
 	}
 	stack, err := gvisor.NewStack(s.client)
 	if err != nil {
