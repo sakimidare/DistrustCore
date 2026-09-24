@@ -25,6 +25,8 @@ type Resolver struct {
 	dnsResource       map[string][]net.IP
 	dnsResourceCursor sync.Map
 	useRemoteDNS      bool
+	externalLookup    func(context.Context, string) ([]net.IP, error)
+	preferredIP       func(net.IP) bool
 
 	dnsCache *cache.Cache
 
@@ -152,22 +154,67 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 		}
 	}
 
+	candidates := make([]net.IP, 0, 4)
 	if r.useRemoteDNS {
 		ip, err := r.resolveCoordinated(ctx, host, func(lookupCtx context.Context) (net.IP, error) {
 			return r.resolveRemote(lookupCtx, host)
 		})
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx, nil, ctx.Err()
-			}
-			log.Printf("Resolve IPv4 addr failed using remote DNS: %s, using secondary DNS instead", host)
-			return r.ResolveWithSecondaryDNS(ctx, host)
+		if err == nil {
+			candidates = appendUniqueIPs(candidates, ip)
+			log.Printf("flow=%d dns remote host=%s answer=%s", flowID, host, ip.String())
+		} else {
+			log.Printf("flow=%d remote DNS failed host=%s error=%v", flowID, host, err)
 		}
-		log.Printf("flow=%d dns remote host=%s answer=%s", flowID, host, ip.String())
-		return ctx, ip, nil
-	} else {
+	}
+	if r.externalLookup != nil {
+		ips, err := r.externalLookup(ctx, host)
+		if err == nil {
+			for _, ip := range ips {
+				candidates = appendUniqueIPs(candidates, ip)
+			}
+			log.Printf("flow=%d dns system host=%s answers=%v", flowID, host, ips)
+		} else {
+			log.Printf("flow=%d system DNS failed host=%s error=%v", flowID, host, err)
+		}
+	}
+	if len(candidates) == 0 {
+		if ctx.Err() != nil {
+			return ctx, nil, ctx.Err()
+		}
 		return r.ResolveWithSecondaryDNS(ctx, host)
 	}
+	selected := candidates[0]
+	if r.preferredIP != nil {
+		for _, candidate := range candidates {
+			if r.preferredIP(candidate) {
+				selected = candidate
+				log.Printf("flow=%d dns selected resource-matching IP host=%s answer=%s", flowID, host, selected)
+				break
+			}
+		}
+	}
+	r.setDNSCache(host, selected)
+	return ctx, selected, nil
+}
+
+func appendUniqueIPs(values []net.IP, candidate net.IP) []net.IP {
+	if candidate == nil {
+		return values
+	}
+	for _, value := range values {
+		if value.Equal(candidate) {
+			return values
+		}
+	}
+	return append(values, candidate)
+}
+
+func (r *Resolver) SetExternalLookup(lookup func(context.Context, string) ([]net.IP, error)) {
+	r.externalLookup = lookup
+}
+
+func (r *Resolver) SetPreferredIP(match func(net.IP) bool) {
+	r.preferredIP = match
 }
 
 func (r *Resolver) resolveCoordinated(ctx context.Context, host string, lookup func(context.Context) (net.IP, error)) (net.IP, error) {

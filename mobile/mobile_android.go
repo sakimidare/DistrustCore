@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/mythologyli/zju-connect/stack/gvisor"
 	"github.com/mythologyli/zju-connect/stack/tun"
 	"github.com/mythologyli/zju-connect/underlay"
+	"inet.af/netaddr"
 )
 
 // ChallengeCallback is implemented by the Android layer. OnChallenge receives
@@ -33,6 +35,10 @@ type ChallengeCallback interface {
 
 type LogCallback interface {
 	OnLog(line string)
+}
+
+type DNSCallback interface {
+	Resolve(host string) string
 }
 
 type callbackLogWriter struct{ callback LogCallback }
@@ -182,6 +188,13 @@ type resourceSnapshot struct {
 
 var sessionMu sync.Mutex
 var activeSession *mobileSession
+var dnsCallback DNSCallback
+
+func SetDNSCallback(callback DNSCallback) {
+	sessionMu.Lock()
+	dnsCallback = callback
+	sessionMu.Unlock()
+}
 
 // Capabilities reports only features implemented by this mobile binding.
 func Capabilities() string {
@@ -531,6 +544,34 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
 	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
+	sessionMu.Lock()
+	hostDNSCallback := dnsCallback
+	sessionMu.Unlock()
+	if hostDNSCallback != nil {
+		resolver.SetExternalLookup(func(_ context.Context, host string) ([]net.IP, error) {
+			value := hostDNSCallback.Resolve(host)
+			var addresses []string
+			if err := json.Unmarshal([]byte(value), &addresses); err != nil {
+				return nil, err
+			}
+			ips := make([]net.IP, 0, len(addresses))
+			for _, address := range addresses {
+				if ip := net.ParseIP(address); ip != nil {
+					ips = append(ips, ip)
+				}
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("Android system DNS returned no IPv4 address")
+			}
+			return ips, nil
+		})
+	}
+	if ipSet, ipSetErr := s.client.IPSet(); ipSetErr == nil && ipSet != nil {
+		resolver.SetPreferredIP(func(ip net.IP) bool {
+			parsed, parseErr := netaddr.ParseIP(ip.String())
+			return parseErr == nil && ipSet.Contains(parsed)
+		})
+	}
 	for domain, address := range config.CustomDNS {
 		ip := net.ParseIP(address)
 		if ip == nil {
