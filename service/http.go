@@ -219,6 +219,37 @@ func newHTTPServer(bindAddr string, handler http.Handler) *http.Server {
 	}
 }
 
+type mobileHTTPServer struct {
+	server *http.Server
+	proxy  *httpProxy
+}
+
+func (s *mobileHTTPServer) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.proxy.close()
+	return s.server.Shutdown(ctx)
+}
+
+// StartHTTP starts an HTTP CONNECT proxy without process-global lifecycle
+// hooks, allowing an Android service to stop and restart it safely.
+func StartHTTP(bindAddr string, dialer *dial.Dialer) (io.Closer, error) {
+	proxy := newHTTPProxy(dialer)
+	server := newHTTPServer(bindAddr, proxy)
+	listener, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		proxy.close()
+		return nil, err
+	}
+	log.Printf("HTTP server listening on %s", listener.Addr())
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			log.Println("HTTP listen failed: " + serveErr.Error())
+		}
+	}()
+	return &mobileHTTPServer{server: server, proxy: proxy}, nil
+}
+
 func ServeHTTP(bindAddr string, dialer *dial.Dialer) {
 	proxy := newHTTPProxy(dialer)
 

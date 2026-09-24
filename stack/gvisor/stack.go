@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	clientpkg "github.com/mythologyli/zju-connect/client"
 	"github.com/mythologyli/zju-connect/client/easyconnect"
@@ -31,6 +32,7 @@ type Stack struct {
 	endpoint *Endpoint
 	ipMu     sync.Mutex
 	ip       tcpip.Address
+	closed   atomic.Bool
 }
 
 const NICID tcpip.NICID = 1
@@ -238,7 +240,7 @@ func (s *Stack) Run() {
 	for {
 		n, err := s.endpoint.l3Conn.Read(buf)
 		if err != nil {
-			if hook_func.IsTerminal() {
+			if s.closed.Load() || hook_func.IsTerminal() {
 				return
 			} else {
 				panic(err)
@@ -250,6 +252,18 @@ func (s *Stack) Run() {
 		packetBuffer := makeInboundPacketBuffer(buf, n)
 		s.endpoint.dispatcher.DeliverNetworkPacket(header.IPv4ProtocolNumber, packetBuffer)
 		packetBuffer.DecRef()
+	}
+}
+
+// Close stops a library-owned stack without relying on process-global terminal
+// hooks. It is primarily used by Android mobile sessions, which may reconnect
+// several times during one application process.
+func (s *Stack) Close() {
+	if s.closed.Swap(true) {
+		return
+	}
+	if s.endpoint != nil && s.endpoint.l3Conn != nil {
+		_ = s.endpoint.l3Conn.Close()
 	}
 }
 
