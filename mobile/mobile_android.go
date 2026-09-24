@@ -1,6 +1,7 @@
 package mobile
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"github.com/mythologyli/zju-connect/client"
 	atrustclient "github.com/mythologyli/zju-connect/client/atrust"
 	"github.com/mythologyli/zju-connect/client/atrust/auth"
+	"github.com/mythologyli/zju-connect/client/authchallenge"
 	easyconnectclient "github.com/mythologyli/zju-connect/client/easyconnect"
 	"github.com/mythologyli/zju-connect/dial"
 	"github.com/mythologyli/zju-connect/log"
@@ -21,6 +23,59 @@ import (
 	"github.com/mythologyli/zju-connect/stack/tun"
 	"github.com/mythologyli/zju-connect/underlay"
 )
+
+// ChallengeCallback is implemented by the Android layer. OnChallenge receives
+// a JSON challenge and blocks until the UI returns a JSON response.
+type ChallengeCallback interface {
+	OnChallenge(challengeJSON string) string
+}
+
+type callbackChallengeHandler struct{ callback ChallengeCallback }
+
+func (h callbackChallengeHandler) request(kind string, payload any, response any) error {
+	request, err := json.Marshal(map[string]any{"type": kind, "payload": payload})
+	if err != nil {
+		return err
+	}
+	value := h.callback.OnChallenge(string(request))
+	if value == "" {
+		return fmt.Errorf("authentication challenge cancelled")
+	}
+	return json.Unmarshal([]byte(value), response)
+}
+
+func (h callbackChallengeHandler) HandleCodeChallenge(challenge authchallenge.CodeChallenge) (authchallenge.CodeResponse, error) {
+	var response authchallenge.CodeResponse
+	err := h.request("code", map[string]any{
+		"kind": challenge.Kind, "message": challenge.Message,
+		"canSkipSecondaryAuth": challenge.CanSkipSecondaryAuth,
+	}, &response)
+	return response, err
+}
+
+func (h callbackChallengeHandler) HandleTextCaptcha(challenge authchallenge.TextCaptchaChallenge) (authchallenge.TextCaptchaResponse, error) {
+	var response authchallenge.TextCaptchaResponse
+	err := h.request("textCaptcha", map[string]any{
+		"imageBase64": base64.StdEncoding.EncodeToString(challenge.Image), "message": challenge.Message,
+	}, &response)
+	return response, err
+}
+
+func (h callbackChallengeHandler) HandleClickCaptcha(challenge authchallenge.ClickCaptchaChallenge) (authchallenge.ClickCaptchaResponse, error) {
+	var response authchallenge.ClickCaptchaResponse
+	err := h.request("clickCaptcha", map[string]any{
+		"imageBase64": base64.StdEncoding.EncodeToString(challenge.Image), "message": challenge.Message,
+	}, &response)
+	return response, err
+}
+
+func (h callbackChallengeHandler) HandleExternalLogin(challenge authchallenge.ExternalLoginChallenge) (authchallenge.ExternalLoginResponse, error) {
+	var response authchallenge.ExternalLoginResponse
+	err := h.request("externalLogin", map[string]any{
+		"kind": challenge.Kind, "loginUrl": challenge.LoginURL, "message": challenge.Message,
+	}, &response)
+	return response, err
+}
 
 type mobileConfig struct {
 	Protocol      string `json:"protocol"`
@@ -74,11 +129,19 @@ func Capabilities() string {
 // Prepare negotiates a VPN session and returns addresses, routes and DNS as JSON.
 // StartStack must subsequently receive the Android VpnService TUN descriptor.
 func Prepare(configJSON string) string {
+	return prepare(configJSON, nil)
+}
+
+func PrepareWithCallback(configJSON string, callback ChallengeCallback) string {
+	return prepare(configJSON, callback)
+}
+
+func prepare(configJSON string, callback ChallengeCallback) string {
 	config, err := parseConfig(configJSON)
 	if err != nil {
 		return failure("invalid_config", err)
 	}
-	sess, result, err := createSession(config)
+	sess, result, err := createSession(config, callback)
 	if err != nil {
 		return failure("login_failed", err)
 	}
@@ -89,6 +152,14 @@ func Prepare(configJSON string) string {
 // StartProxy starts aTrust/EasyConnect with loopback SOCKS5 and/or HTTP listeners
 // without consuming Android's single VpnService slot.
 func StartProxy(configJSON string) string {
+	return startProxy(configJSON, nil)
+}
+
+func StartProxyWithCallback(configJSON string, callback ChallengeCallback) string {
+	return startProxy(configJSON, callback)
+}
+
+func startProxy(configJSON string, callback ChallengeCallback) string {
 	config, err := parseConfig(configJSON)
 	if err != nil {
 		return failure("invalid_config", err)
@@ -96,7 +167,7 @@ func StartProxy(configJSON string) string {
 	if config.SocksBind == "" && config.HTTPBind == "" {
 		return failure("invalid_config", fmt.Errorf("at least one proxy listener is required"))
 	}
-	sess, result, err := createSession(config)
+	sess, result, err := createSession(config, callback)
 	if err != nil {
 		return failure("login_failed", err)
 	}
@@ -179,7 +250,7 @@ func parseConfig(value string) (mobileConfig, error) {
 	return config, nil
 }
 
-func createSession(config mobileConfig) (*mobileSession, mobileResult, error) {
+func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSession, mobileResult, error) {
 	log.Init()
 	underlayDialer, err := underlay.New(underlay.Options{AutoDetect: false})
 	if err != nil {
@@ -187,14 +258,19 @@ func createSession(config mobileConfig) (*mobileSession, mobileResult, error) {
 	}
 	sess := &mobileSession{underlay: underlayDialer}
 	var clientData []byte
+	var challengeHandler authchallenge.Handler
+	if callback != nil {
+		challengeHandler = callbackChallengeHandler{callback: callback}
+	}
 
 	switch strings.ToLower(config.Protocol) {
 	case "easyconnect":
 		vpnClient := easyconnectclient.NewClient(easyconnectclient.Options{
-			Server:         net.JoinHostPort(config.Server, fmt.Sprintf("%d", config.Port)),
-			Auth:           easyconnectclient.AuthOptions{Username: config.Username, Password: config.Password, TOTPSecret: config.TOTPSecret},
-			Resources:      easyconnectclient.ResourceOptions{Fetch: !config.DisableConfig, IncludeDomains: true},
-			UnderlayDialer: underlayDialer,
+			Server:           net.JoinHostPort(config.Server, fmt.Sprintf("%d", config.Port)),
+			Auth:             easyconnectclient.AuthOptions{Username: config.Username, Password: config.Password, TOTPSecret: config.TOTPSecret},
+			Resources:        easyconnectclient.ResourceOptions{Fetch: !config.DisableConfig, IncludeDomains: true},
+			UnderlayDialer:   underlayDialer,
+			ChallengeHandler: challengeHandler,
 		})
 		if err = vpnClient.Setup(); err != nil {
 			vpnClient.Close()
@@ -206,10 +282,6 @@ func createSession(config mobileConfig) (*mobileSession, mobileResult, error) {
 		authType := config.AuthType
 		if authType != "" && !strings.HasPrefix(authType, "auth/") {
 			authType = "auth/" + authType
-		}
-		if authType != "" && authType != "auth/psw" {
-			_ = underlayDialer.Close()
-			return nil, mobileResult{}, fmt.Errorf("mobile API currently supports aTrust password auth only")
 		}
 		method, methodErr := auth.NewLoginMethod(auth.LoginMethodOptions{
 			AuthType: authType, Username: config.Username, Password: config.Password,
@@ -230,6 +302,7 @@ func createSession(config mobileConfig) (*mobileSession, mobileResult, error) {
 		clientData, err = vpnClient.Setup(atrustclient.SetupOptions{
 			ServerAddress: config.Server, ServerPort: config.Port, LoginMethod: method,
 			TOTPSecret: config.TOTPSecret, ClientData: savedClientData,
+			ChallengeHandler:         challengeHandler,
 			BestNodesRefreshInterval: 5 * time.Minute,
 			SessionRefreshInterval:   30 * time.Minute,
 		})
