@@ -510,15 +510,27 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 	domainResources, _ := s.client.DomainResources()
 	dnsResources, _ := s.client.DNSResource()
 	remoteDNS := config.RemoteDNS
+	policyDNSServers, _ := s.client.DNSServers()
 	if remoteDNS == "auto" {
-		remoteDNS, _ = s.client.DNSServer()
+		if len(policyDNSServers) > 0 {
+			remoteDNS = policyDNSServers[0]
+		} else {
+			remoteDNS, _ = s.client.DNSServer()
+		}
+	}
+	secondaryDNS := config.SecondaryDNS
+	if secondaryDNS == "" || secondaryDNS == "auto" {
+		if len(policyDNSServers) > 1 {
+			secondaryDNS = policyDNSServers[1]
+		}
 	}
 	stack, err := gvisor.NewStack(s.client)
 	if err != nil {
 		return err
 	}
-	resolver := resolve.NewResolver(stack, remoteDNS, config.SecondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
-	stack.SetupResolve(service.NewDnsServer(resolver, []string{remoteDNS, config.SecondaryDNS}))
+	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
+	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
+	stack.SetupResolve(service.NewDnsServer(resolver, []string{remoteDNS, secondaryDNS}))
 	stack.SetupIPPool(resolver.IPPool)
 	s.gvisor = stack
 	s.resolver = resolver
