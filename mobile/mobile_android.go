@@ -22,7 +22,7 @@ import (
 	"github.com/mythologyli/zju-connect/resolve"
 	"github.com/mythologyli/zju-connect/service"
 	"github.com/mythologyli/zju-connect/stack/gvisor"
-	"github.com/mythologyli/zju-connect/stack/tun"
+	"github.com/mythologyli/zju-connect/stack/mobiletun"
 	"github.com/mythologyli/zju-connect/underlay"
 	"inet.af/netaddr"
 )
@@ -149,13 +149,15 @@ type mobileResult struct {
 }
 
 type mobileSession struct {
-	client   client.Client
-	underlay *underlay.Dialer
-	gvisor   *gvisor.Stack
-	resolver *resolve.Resolver
-	servers  []io.Closer
-	tunStack *tun.Stack
-	mu       sync.Mutex
+	client    client.Client
+	underlay  *underlay.Dialer
+	gvisor    *gvisor.Stack
+	resolver  *resolve.Resolver
+	dialer    *dial.Dialer
+	dnsServer service.DNSServer
+	servers   []io.Closer
+	tunStack  *mobiletun.Stack
+	mu        sync.Mutex
 }
 
 type snapshotIPResource struct {
@@ -302,16 +304,18 @@ func StartStack(fd int) string {
 	if sess == nil || sess.client == nil {
 		return failure("no_active_session", fmt.Errorf("no active session"))
 	}
-	stack, err := tun.NewStack(sess.client, false, false, nil)
+	if sess.dialer == nil || sess.resolver == nil {
+		return failure("policy_not_ready", fmt.Errorf("policy engine is not ready"))
+	}
+	stack, err := mobiletun.New(fd, sess.dialer, sess.resolver, sess.dnsServer)
 	if err != nil {
-		log.Printf("create Android TUN stack: %v", err)
+		log.Printf("create Android tun2socks stack: %v", err)
 		return failure("tun_start_failed", err)
 	}
-	stack.SetupTun(fd)
 	sess.mu.Lock()
 	sess.tunStack = stack
 	sess.mu.Unlock()
-	runErr := stack.RunWithError()
+	runErr := stack.Run()
 	sess.mu.Lock()
 	if sess.tunStack == stack {
 		sess.tunStack = nil
@@ -497,6 +501,10 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 		sess.close()
 		return nil, mobileResult{}, err
 	}
+	if err = sess.setupPolicy(config); err != nil {
+		sess.close()
+		return nil, mobileResult{}, fmt.Errorf("setup mobile policy engine: %w", err)
+	}
 	result.ClientData = string(clientData)
 	return sess, result, nil
 }
@@ -522,6 +530,29 @@ func negotiatedResult(vpnClient client.Client) (mobileResult, error) {
 }
 
 func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) error {
+	if s.dialer == nil || s.resolver == nil {
+		return fmt.Errorf("policy engine is not ready")
+	}
+	if config.SocksBind != "" {
+		closer, startErr := service.StartSocks5(config.SocksBind, s.dialer, s.resolver, "", "")
+		if startErr != nil {
+			return startErr
+		}
+		s.servers = append(s.servers, closer)
+		result.SocksAddress = config.SocksBind
+	}
+	if config.HTTPBind != "" {
+		closer, startErr := service.StartHTTP(config.HTTPBind, s.dialer)
+		if startErr != nil {
+			return startErr
+		}
+		s.servers = append(s.servers, closer)
+		result.HTTPAddress = config.HTTPBind
+	}
+	return nil
+}
+
+func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	ipResources, _ := s.client.IPResources()
 	domainResources, _ := s.client.DomainResources()
 	dnsResources, _ := s.client.DNSResource()
@@ -600,29 +631,15 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 		resolver.SetPermanentDNS(domain, ip)
 		log.Printf("custom DNS: %s -> %s", domain, ip)
 	}
-	stack.SetupResolve(service.NewDnsServer(resolver, []string{remoteDNS, secondaryDNS}))
+	dnsServer := service.NewDnsServer(resolver, []string{remoteDNS, secondaryDNS})
+	stack.SetupResolve(dnsServer)
 	stack.SetupIPPool(resolver.IPPool)
 	s.gvisor = stack
 	s.resolver = resolver
+	s.dnsServer = dnsServer
 	go stack.Run()
 
-	vpnDialer := dial.NewDialer(stack, resolver, ipResources, config.ProxyAll, "")
-	if config.SocksBind != "" {
-		closer, startErr := service.StartSocks5(config.SocksBind, vpnDialer, resolver, "", "")
-		if startErr != nil {
-			return startErr
-		}
-		s.servers = append(s.servers, closer)
-		result.SocksAddress = config.SocksBind
-	}
-	if config.HTTPBind != "" {
-		closer, startErr := service.StartHTTP(config.HTTPBind, vpnDialer)
-		if startErr != nil {
-			return startErr
-		}
-		s.servers = append(s.servers, closer)
-		result.HTTPAddress = config.HTTPBind
-	}
+	s.dialer = dial.NewDialer(stack, resolver, ipResources, config.ProxyAll, "")
 	return nil
 }
 
