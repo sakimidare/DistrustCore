@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -41,6 +42,13 @@ type DNSCallback interface {
 	Resolve(host string) string
 	LookupHistory(host string) string
 	RecordSuccess(host string, address string)
+}
+
+// SessionCallback reports structured aTrust lifecycle events to Android.
+// Updated client data contains refreshed cookies and must be persisted securely.
+type SessionCallback interface {
+	OnExpired(reason string)
+	OnClientDataUpdated(clientData string)
 }
 
 type callbackLogWriter struct{ callback LogCallback }
@@ -193,11 +201,37 @@ type resourceSnapshot struct {
 var sessionMu sync.Mutex
 var activeSession *mobileSession
 var dnsCallback DNSCallback
+var sessionCallback SessionCallback
 
 func SetDNSCallback(callback DNSCallback) {
 	sessionMu.Lock()
 	dnsCallback = callback
 	sessionMu.Unlock()
+}
+
+func SetSessionCallback(callback SessionCallback) {
+	sessionMu.Lock()
+	sessionCallback = callback
+	sessionMu.Unlock()
+}
+
+func notifySessionExpired(err error) {
+	sessionMu.Lock()
+	callback := sessionCallback
+	sessionMu.Unlock()
+	if callback != nil {
+		callback.OnExpired(err.Error())
+	}
+}
+
+func notifyClientDataUpdated(data []byte) error {
+	sessionMu.Lock()
+	callback := sessionCallback
+	sessionMu.Unlock()
+	if callback != nil && len(data) > 0 {
+		callback.OnClientDataUpdated(string(data))
+	}
+	return nil
 }
 
 // Capabilities reports only features implemented by this mobile binding.
@@ -425,6 +459,7 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 	log.Init()
 	atrustclient.SetEmbeddedMode(func(err error) {
 		log.Printf("session-expired event: %v", err)
+		notifySessionExpired(err)
 	})
 	// Android shares this process with the UI, so a failing data plane must be
 	// reported instead of aborting the application.
@@ -484,8 +519,12 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 			ChallengeHandler:         challengeHandler,
 			BestNodesRefreshInterval: time.Duration(config.UpdateBestNodesInterval) * time.Second,
 			SessionRefreshInterval:   time.Duration(config.SessionRefreshInterval) * time.Second,
+			SaveClientData:           notifyClientDataUpdated,
 		})
 		if err != nil {
+			if errors.Is(err, auth.ErrSessionInvalid) {
+				notifySessionExpired(err)
+			}
 			vpnClient.Close()
 			_ = underlayDialer.Close()
 			return nil, mobileResult{}, err
