@@ -138,6 +138,9 @@ type mobileConfig struct {
 	DisableConfig           bool              `json:"disableServerConfig"`
 	DisableRemoteDNS        bool              `json:"disableRemoteDns"`
 	SkipDomainResource      bool              `json:"skipDomainResource"`
+	DialDirectProxy         string            `json:"dialDirectProxy"`
+	DisableKeepAlive        bool              `json:"disableKeepAlive"`
+	KeepAliveURL            string            `json:"keepAliveUrl"`
 	DNSTTL                  int               `json:"dnsTtl"`
 	UpdateBestNodesInterval int               `json:"updateBestNodesInterval"`
 	SessionRefreshInterval  int               `json:"sessionRefreshInterval"`
@@ -161,15 +164,16 @@ type mobileResult struct {
 }
 
 type mobileSession struct {
-	client    client.Client
-	underlay  *underlay.Dialer
-	gvisor    *gvisor.Stack
-	resolver  *resolve.Resolver
-	dialer    *dial.Dialer
-	dnsServer service.DNSServer
-	servers   []io.Closer
-	tunStack  *mobiletun.Stack
-	mu        sync.Mutex
+	client          client.Client
+	underlay        *underlay.Dialer
+	gvisor          *gvisor.Stack
+	resolver        *resolve.Resolver
+	dialer          *dial.Dialer
+	dnsServer       service.DNSServer
+	servers         []io.Closer
+	tunStack        *mobiletun.Stack
+	keepAliveCancel context.CancelFunc
+	mu              sync.Mutex
 }
 
 type snapshotIPResource struct {
@@ -717,11 +721,21 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	s.dnsServer = dnsServer
 	go stack.Run()
 
-	s.dialer = dial.NewDialer(stack, resolver, ipResources, config.ProxyAll, "")
+	s.dialer = dial.NewDialer(stack, resolver, ipResources, config.ProxyAll, config.DialDirectProxy)
+	if !config.DisableKeepAlive && (config.KeepAliveURL != "" || useRemoteDNS) {
+		keepAliveCtx, cancel := context.WithCancel(context.Background())
+		s.keepAliveCancel = cancel
+		go service.KeepAlive(keepAliveCtx, resolver, s.dialer, config.KeepAliveURL)
+		log.Printf("mobile keep-alive enabled url=%q", config.KeepAliveURL)
+	}
 	return nil
 }
 
 func (s *mobileSession) close() {
+	if s.keepAliveCancel != nil {
+		s.keepAliveCancel()
+		s.keepAliveCancel = nil
+	}
 	for _, server := range s.servers {
 		_ = server.Close()
 	}
