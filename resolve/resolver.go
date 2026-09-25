@@ -49,7 +49,7 @@ type Resolver struct {
 }
 
 const remoteDNSTCPFallbackDelay = 300 * time.Millisecond
-const candidatePreferenceWindow = 750 * time.Millisecond
+const candidatePreferenceWindow = 250 * time.Millisecond
 const candidateLookupTimeout = 4 * time.Second
 
 type lookupIPFunc func(context.Context, string, string) ([]net.IP, error)
@@ -192,6 +192,15 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 	}
 	results := make(chan candidateLookupResult, 3+len(r.additionalLookups))
 	pending := 0
+	systemDone := r.externalLookup == nil
+	hasPolicySecondary := false
+	for _, extra := range r.additionalLookups {
+		if extra.source == "policy-secondary" {
+			hasPolicySecondary = true
+			break
+		}
+	}
+	policyDone := !hasPolicySecondary
 	if r.useRemoteDNS {
 		pending++
 		go func() {
@@ -243,8 +252,17 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 		select {
 		case result := <-results:
 			completed++
+			if result.source == "system" {
+				systemDone = true
+			}
+			if result.source == "policy-secondary" {
+				policyDone = true
+			}
 			if result.err != nil {
 				log.Printf("flow=%d %s DNS failed host=%s error=%v", flowID, result.source, host, result.err)
+				if len(candidates) > 0 && systemDone && policyDone {
+					completed = pending
+				}
 				continue
 			}
 			for _, ip := range result.ips {
@@ -256,6 +274,9 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 				}
 			}
 			log.Printf("flow=%d dns %s host=%s answers=%v", flowID, result.source, host, result.ips)
+			if len(candidates) > 0 && systemDone && policyDone {
+				completed = pending
+			}
 		case <-timerC:
 			timerC = nil
 			if len(candidates) > 0 {
@@ -299,6 +320,22 @@ func appendUniqueIPs(values []net.IP, candidate net.IP) []net.IP {
 
 func (r *Resolver) SetExternalLookup(lookup func(context.Context, string) ([]net.IP, error)) {
 	r.externalLookup = lookup
+}
+
+// ProbeFallback checks live non-policy DNS sources without consulting the DNS cache.
+// It is used for connectivity health after the policy DNS path fails.
+func (r *Resolver) ProbeFallback(ctx context.Context, host string) (string, error) {
+	if r.externalLookup != nil {
+		if ips, err := r.externalLookup(ctx, host); err == nil && len(ips) > 0 {
+			return "Android DNS", nil
+		}
+	}
+	if r.secondaryResolver != nil {
+		if ips, err := r.secondaryResolver.LookupIP(ctx, "ip4", host); err == nil && len(ips) > 0 {
+			return "备用 DNS", nil
+		}
+	}
+	return "", fmt.Errorf("all live DNS probes failed for %s", host)
 }
 
 func (r *Resolver) AddLookupSource(source string, lookup func(context.Context, string) ([]net.IP, error)) {

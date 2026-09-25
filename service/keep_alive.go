@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	keepAliveRequestTimeout = 10 * time.Second
-	keepAliveDrainLimit     = 32 << 10
+	keepAliveRequestTimeout    = 10 * time.Second
+	keepAliveDNSAttemptTimeout = 3 * time.Second
+	keepAliveDrainLimit        = 32 << 10
 )
 
 func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dialer, keepAliveURL string) {
@@ -56,18 +57,18 @@ func KeepAliveWithStatus(ctx context.Context, resolver *resolve.Resolver, dialer
 		defer ticker.Stop()
 
 		for {
-			useTCP := false
 			started := time.Now()
-			requestCtx, cancel := context.WithTimeout(ctx, keepAliveRequestTimeout)
-
+			success := false
 			if remoteUDPResolver != nil {
+				requestCtx, cancel := context.WithTimeout(ctx, keepAliveDNSAttemptTimeout)
 				_, err := remoteUDPResolver.LookupIP(requestCtx, "ip4", "www.baidu.com")
+				cancel()
 				if err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						log.DebugPrintf("KeepAlive using UDP error: %s", err)
 					}
-					useTCP = true
 				} else {
+					success = true
 					log.Printf("KeepAlive using UDP: OK")
 					if report != nil {
 						report(true, time.Since(started), "DNS UDP")
@@ -75,23 +76,36 @@ func KeepAliveWithStatus(ctx context.Context, resolver *resolve.Resolver, dialer
 				}
 			}
 
-			if useTCP && remoteTCPResolver != nil {
+			if !success && remoteTCPResolver != nil {
+				requestCtx, cancel := context.WithTimeout(ctx, keepAliveDNSAttemptTimeout)
 				_, err := remoteTCPResolver.LookupIP(requestCtx, "ip4", "www.baidu.com")
+				cancel()
 				if err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						log.Printf("KeepAlive using TCP error: %s", err)
 					}
-					if report != nil {
-						report(false, time.Since(started), err.Error())
-					}
 				} else {
+					success = true
 					log.Printf("KeepAlive using TCP: OK")
 					if report != nil {
 						report(true, time.Since(started), "DNS TCP")
 					}
 				}
 			}
-			cancel()
+			if !success {
+				requestCtx, cancel := context.WithTimeout(ctx, keepAliveDNSAttemptTimeout)
+				source, err := resolver.ProbeFallback(requestCtx, "www.baidu.com")
+				cancel()
+				if err == nil {
+					success = true
+					log.Printf("KeepAlive using %s: OK", source)
+					if report != nil {
+						report(true, time.Since(started), source)
+					}
+				} else if report != nil {
+					report(false, time.Since(started), err.Error())
+				}
+			}
 
 			select {
 			case <-ctx.Done():
