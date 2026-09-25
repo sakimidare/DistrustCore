@@ -27,6 +27,7 @@ type Resolver struct {
 	dnsResourceCursor sync.Map
 	useRemoteDNS      bool
 	externalLookup    func(context.Context, string) ([]net.IP, error)
+	additionalLookups []candidateLookup
 	historyLookup     func(string) []net.IP
 	successRecorder   func(string, net.IP)
 	preferredIP       func(net.IP) bool
@@ -49,6 +50,7 @@ type Resolver struct {
 
 const remoteDNSTCPFallbackDelay = 300 * time.Millisecond
 const candidatePreferenceWindow = 750 * time.Millisecond
+const candidateLookupTimeout = 4 * time.Second
 
 type lookupIPFunc func(context.Context, string, string) ([]net.IP, error)
 
@@ -61,6 +63,11 @@ type candidateLookupResult struct {
 	source string
 	ips    []net.IP
 	err    error
+}
+
+type candidateLookup struct {
+	source string
+	lookup func(context.Context, string) ([]net.IP, error)
 }
 
 type sharedResolution struct {
@@ -183,12 +190,14 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			}
 		}
 	}
-	results := make(chan candidateLookupResult, 3)
+	results := make(chan candidateLookupResult, 3+len(r.additionalLookups))
 	pending := 0
 	if r.useRemoteDNS {
 		pending++
 		go func() {
-			ip, err := r.resolveCoordinated(ctx, host, func(lookupCtx context.Context) (net.IP, error) {
+			lookupCtx, cancel := context.WithTimeout(ctx, candidateLookupTimeout)
+			defer cancel()
+			ip, err := r.resolveCoordinated(lookupCtx, host, func(lookupCtx context.Context) (net.IP, error) {
 				return r.resolveRemote(lookupCtx, host)
 			})
 			var ips []net.IP
@@ -201,15 +210,29 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 	if r.externalLookup != nil {
 		pending++
 		go func() {
-			ips, err := r.externalLookup(ctx, host)
+			lookupCtx, cancel := context.WithTimeout(ctx, candidateLookupTimeout)
+			defer cancel()
+			ips, err := r.externalLookup(lookupCtx, host)
 			results <- candidateLookupResult{source: "system", ips: ips, err: err}
 		}()
 	}
 	if r.secondaryResolver != nil {
 		pending++
 		go func() {
-			ips, err := r.secondaryResolver.LookupIP(ctx, "ip4", host)
+			lookupCtx, cancel := context.WithTimeout(ctx, candidateLookupTimeout)
+			defer cancel()
+			ips, err := r.secondaryResolver.LookupIP(lookupCtx, "ip4", host)
 			results <- candidateLookupResult{source: "secondary", ips: ips, err: err}
+		}()
+	}
+	for _, extra := range r.additionalLookups {
+		extra := extra
+		pending++
+		go func() {
+			lookupCtx, cancel := context.WithTimeout(ctx, candidateLookupTimeout)
+			defer cancel()
+			ips, err := extra.lookup(lookupCtx, host)
+			results <- candidateLookupResult{source: extra.source, ips: ips, err: err}
 		}()
 	}
 	timer := time.NewTimer(candidatePreferenceWindow)
@@ -276,6 +299,13 @@ func appendUniqueIPs(values []net.IP, candidate net.IP) []net.IP {
 
 func (r *Resolver) SetExternalLookup(lookup func(context.Context, string) ([]net.IP, error)) {
 	r.externalLookup = lookup
+}
+
+func (r *Resolver) AddLookupSource(source string, lookup func(context.Context, string) ([]net.IP, error)) {
+	if source == "" || lookup == nil {
+		return
+	}
+	r.additionalLookups = append(r.additionalLookups, candidateLookup{source: source, lookup: lookup})
 }
 
 func (r *Resolver) SetPreferredIP(match func(net.IP) bool) {

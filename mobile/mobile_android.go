@@ -566,6 +566,7 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 		}
 	}
 	secondaryDNS := config.SecondaryDNS
+	secondaryPolicyDNS := ""
 	if secondaryDNS == "" || secondaryDNS == "auto" {
 		// Keep the server-provided secondary resolver. Some aTrust deployments
 		// publish split-DNS records only on one of their policy DNS servers.
@@ -575,6 +576,7 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 		for _, candidate := range policyDNSServers {
 			if candidate != "" && candidate != remoteDNS {
 				secondaryDNS = candidate
+				secondaryPolicyDNS = candidate
 				break
 			}
 		}
@@ -585,6 +587,17 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
 	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
+	if secondaryPolicyDNS != "" {
+		policyResolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return stack.DialUDP(ctx, &net.UDPAddr{IP: net.ParseIP(secondaryPolicyDNS), Port: 53})
+			},
+		}
+		resolver.AddLookupSource("policy-secondary", func(ctx context.Context, host string) ([]net.IP, error) {
+			return policyResolver.LookupIP(ctx, "ip4", host)
+		})
+	}
 	sessionMu.Lock()
 	hostDNSCallback := dnsCallback
 	sessionMu.Unlock()
