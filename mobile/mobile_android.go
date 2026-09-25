@@ -51,6 +51,7 @@ type DNSCallback interface {
 type SessionCallback interface {
 	OnExpired(reason string)
 	OnClientDataUpdated(clientData string)
+	OnHealth(success bool, latencyMillis int64, detail string)
 }
 
 type callbackLogWriter struct{ callback LogCallback }
@@ -244,6 +245,15 @@ func notifyClientDataUpdated(data []byte) error {
 		callback.OnClientDataUpdated(string(data))
 	}
 	return nil
+}
+
+func notifySessionHealth(success bool, latency time.Duration, detail string) {
+	sessionMu.Lock()
+	callback := sessionCallback
+	sessionMu.Unlock()
+	if callback != nil {
+		callback.OnHealth(success, latency.Milliseconds(), detail)
+	}
 }
 
 // Capabilities reports only features implemented by this mobile binding.
@@ -785,7 +795,7 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	if !config.DisableKeepAlive && (config.KeepAliveURL != "" || useRemoteDNS) {
 		keepAliveCtx, cancel := context.WithCancel(context.Background())
 		s.keepAliveCancel = cancel
-		go service.KeepAlive(keepAliveCtx, resolver, s.dialer, config.KeepAliveURL)
+		go service.KeepAliveWithStatus(keepAliveCtx, resolver, s.dialer, config.KeepAliveURL, notifySessionHealth)
 		log.Printf("mobile keep-alive enabled url=%q", config.KeepAliveURL)
 	}
 	return nil

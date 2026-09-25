@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -18,6 +19,10 @@ const (
 )
 
 func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dialer, keepAliveURL string) {
+	KeepAliveWithStatus(ctx, resolver, dialer, keepAliveURL, nil)
+}
+
+func KeepAliveWithStatus(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dialer, keepAliveURL string, report func(bool, time.Duration, string)) {
 	if keepAliveURL != "" {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.DialContext = dialer.Dial
@@ -29,7 +34,7 @@ func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dia
 
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
-		runHTTPKeepAlive(ctx, client, keepAliveURL, ticker.C)
+		runHTTPKeepAliveWithStatus(ctx, client, keepAliveURL, ticker.C, report)
 		return
 	} else {
 		remoteUDPResolver, err := resolver.RemoteUDPResolver()
@@ -52,6 +57,7 @@ func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dia
 
 		for {
 			useTCP := false
+			started := time.Now()
 			requestCtx, cancel := context.WithTimeout(ctx, keepAliveRequestTimeout)
 
 			if remoteUDPResolver != nil {
@@ -63,6 +69,9 @@ func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dia
 					useTCP = true
 				} else {
 					log.Printf("KeepAlive using UDP: OK")
+					if report != nil {
+						report(true, time.Since(started), "DNS UDP")
+					}
 				}
 			}
 
@@ -72,8 +81,14 @@ func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dia
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 						log.Printf("KeepAlive using TCP error: %s", err)
 					}
+					if report != nil {
+						report(false, time.Since(started), err.Error())
+					}
 				} else {
 					log.Printf("KeepAlive using TCP: OK")
+					if report != nil {
+						report(true, time.Since(started), "DNS TCP")
+					}
 				}
 			}
 			cancel()
@@ -88,21 +103,35 @@ func KeepAlive(ctx context.Context, resolver *resolve.Resolver, dialer *dial.Dia
 }
 
 func runHTTPKeepAlive(ctx context.Context, client *http.Client, keepAliveURL string, ticks <-chan time.Time) {
+	runHTTPKeepAliveWithStatus(ctx, client, keepAliveURL, ticks, nil)
+}
+
+func runHTTPKeepAliveWithStatus(ctx context.Context, client *http.Client, keepAliveURL string, ticks <-chan time.Time, report func(bool, time.Duration, string)) {
 	for {
+		started := time.Now()
 		requestCtx, cancel := context.WithTimeout(ctx, keepAliveRequestTimeout)
 		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, keepAliveURL, nil)
 		if err != nil {
 			log.Printf("KeepAlive: %s", err)
+			if report != nil {
+				report(false, time.Since(started), err.Error())
+			}
 		} else {
 			resp, err := client.Do(req)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 					log.Printf("KeepAlive: %s", err)
 				}
+				if report != nil {
+					report(false, time.Since(started), err.Error())
+				}
 			} else {
 				log.Printf("KeepAlive: OK, status code %d", resp.StatusCode)
 				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, keepAliveDrainLimit+1))
 				_ = resp.Body.Close()
+				if report != nil {
+					report(true, time.Since(started), fmt.Sprintf("HTTP %d", resp.StatusCode))
+				}
 			}
 		}
 		cancel()
