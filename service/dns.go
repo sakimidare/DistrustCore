@@ -79,7 +79,7 @@ func (d DNSServer) handleSingleDNSResolve(ctx context.Context, requestMsg *dns.M
 }
 
 func NewDnsServer(resolver *resolve.Resolver, dnsServers []string) DNSServer {
-	netIPs := make([]net.IP, len(dnsServers))
+	netIPs := make([]net.IP, 0, len(dnsServers))
 	for _, dnsServer := range dnsServers {
 		if net.ParseIP(dnsServer) != nil {
 			netIPs = append(netIPs, net.ParseIP(dnsServer))

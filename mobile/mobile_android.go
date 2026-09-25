@@ -129,11 +129,15 @@ type mobileConfig struct {
 	Phone                   string            `json:"phone"`
 	ClientData              string            `json:"clientData"`
 	SocksBind               string            `json:"socksBind"`
+	SocksUser               string            `json:"socksUser"`
+	SocksPassword           string            `json:"socksPassword"`
 	HTTPBind                string            `json:"httpBind"`
 	RemoteDNS               string            `json:"remoteDns"`
 	SecondaryDNS            string            `json:"secondaryDns"`
 	ProxyAll                bool              `json:"proxyAll"`
 	DisableConfig           bool              `json:"disableServerConfig"`
+	DisableRemoteDNS        bool              `json:"disableRemoteDns"`
+	SkipDomainResource      bool              `json:"skipDomainResource"`
 	DNSTTL                  int               `json:"dnsTtl"`
 	UpdateBestNodesInterval int               `json:"updateBestNodesInterval"`
 	SessionRefreshInterval  int               `json:"sessionRefreshInterval"`
@@ -540,6 +544,9 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 		sess.close()
 		return nil, mobileResult{}, err
 	}
+	if config.SkipDomainResource {
+		result.DomainResources = nil
+	}
 	if err = sess.setupPolicy(config); err != nil {
 		sess.close()
 		return nil, mobileResult{}, fmt.Errorf("setup mobile policy engine: %w", err)
@@ -573,7 +580,7 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 		return fmt.Errorf("policy engine is not ready")
 	}
 	if config.SocksBind != "" {
-		closer, startErr := service.StartSocks5(config.SocksBind, s.dialer, s.resolver, "", "")
+		closer, startErr := service.StartSocks5(config.SocksBind, s.dialer, s.resolver, config.SocksUser, config.SocksPassword)
 		if startErr != nil {
 			return startErr
 		}
@@ -594,6 +601,10 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	ipResources, _ := s.client.IPResources()
 	domainResources, _ := s.client.DomainResources()
+	if config.SkipDomainResource {
+		domainResources = nil
+		log.Printf("mobile policy: domain resources disabled by user")
+	}
 	dnsResources, _ := s.client.DNSResource()
 	remoteDNS := config.RemoteDNS
 	policyDNSServers, _ := s.client.DNSServers()
@@ -604,6 +615,10 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 			remoteDNS, _ = s.client.DNSServer()
 		}
 	}
+	useRemoteDNS := !config.DisableRemoteDNS && remoteDNS != ""
+	if !useRemoteDNS {
+		log.Printf("mobile policy: remote DNS disabled; using Android/system and direct DNS sources")
+	}
 	secondaryDNS := config.SecondaryDNS
 	secondaryPolicyDNS := ""
 	if secondaryDNS == "" || secondaryDNS == "auto" {
@@ -613,6 +628,9 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 		// when the primary DNS resource's L3/UDP path is temporarily unavailable.
 		secondaryDNS = "114.114.114.114"
 		for _, candidate := range policyDNSServers {
+			if !useRemoteDNS {
+				break
+			}
 			if candidate != "" && candidate != remoteDNS {
 				secondaryDNS = candidate
 				secondaryPolicyDNS = candidate
@@ -625,7 +643,7 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 		return err
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
-	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, remoteDNS != "")
+	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, useRemoteDNS)
 	if secondaryPolicyDNS != "" {
 		policyResolver := &net.Resolver{
 			PreferGo: true,
