@@ -3,6 +3,7 @@ package resolve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -47,12 +48,19 @@ type Resolver struct {
 }
 
 const remoteDNSTCPFallbackDelay = 300 * time.Millisecond
+const candidatePreferenceWindow = 750 * time.Millisecond
 
 type lookupIPFunc func(context.Context, string, string) ([]net.IP, error)
 
 type dnsLookupResult struct {
 	ips []net.IP
 	err error
+}
+
+type candidateLookupResult struct {
+	source string
+	ips    []net.IP
+	err    error
 }
 
 type sharedResolution struct {
@@ -175,33 +183,70 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			}
 		}
 	}
+	results := make(chan candidateLookupResult, 3)
+	pending := 0
 	if r.useRemoteDNS {
-		ip, err := r.resolveCoordinated(ctx, host, func(lookupCtx context.Context) (net.IP, error) {
-			return r.resolveRemote(lookupCtx, host)
-		})
-		if err == nil {
-			candidates = appendUniqueIPs(candidates, ip)
-			log.Printf("flow=%d dns remote host=%s answer=%s", flowID, host, ip.String())
-		} else {
-			log.Printf("flow=%d remote DNS failed host=%s error=%v", flowID, host, err)
-		}
+		pending++
+		go func() {
+			ip, err := r.resolveCoordinated(ctx, host, func(lookupCtx context.Context) (net.IP, error) {
+				return r.resolveRemote(lookupCtx, host)
+			})
+			var ips []net.IP
+			if ip != nil {
+				ips = []net.IP{ip}
+			}
+			results <- candidateLookupResult{source: "remote", ips: ips, err: err}
+		}()
 	}
 	if r.externalLookup != nil {
-		ips, err := r.externalLookup(ctx, host)
-		if err == nil {
-			for _, ip := range ips {
-				candidates = appendUniqueIPs(candidates, ip)
+		pending++
+		go func() {
+			ips, err := r.externalLookup(ctx, host)
+			results <- candidateLookupResult{source: "system", ips: ips, err: err}
+		}()
+	}
+	if r.secondaryResolver != nil {
+		pending++
+		go func() {
+			ips, err := r.secondaryResolver.LookupIP(ctx, "ip4", host)
+			results <- candidateLookupResult{source: "secondary", ips: ips, err: err}
+		}()
+	}
+	timer := time.NewTimer(candidatePreferenceWindow)
+	defer timer.Stop()
+	timerC := timer.C
+	completed := 0
+	for completed < pending {
+		select {
+		case result := <-results:
+			completed++
+			if result.err != nil {
+				log.Printf("flow=%d %s DNS failed host=%s error=%v", flowID, result.source, host, result.err)
+				continue
 			}
-			log.Printf("flow=%d dns system host=%s answers=%v", flowID, host, ips)
-		} else {
-			log.Printf("flow=%d system DNS failed host=%s error=%v", flowID, host, err)
+			for _, ip := range result.ips {
+				candidates = appendUniqueIPs(candidates, ip)
+				if r.preferredIP != nil && r.preferredIP(ip) {
+					r.setDNSCache(host, ip)
+					log.Printf("flow=%d dns selected resource-matching %s answer host=%s answer=%s", flowID, result.source, host, ip)
+					return ctx, ip, nil
+				}
+			}
+			log.Printf("flow=%d dns %s host=%s answers=%v", flowID, result.source, host, result.ips)
+		case <-timerC:
+			timerC = nil
+			if len(candidates) > 0 {
+				completed = pending
+			}
+		case <-ctx.Done():
+			return ctx, nil, ctx.Err()
 		}
 	}
 	if len(candidates) == 0 {
 		if ctx.Err() != nil {
 			return ctx, nil, ctx.Err()
 		}
-		return r.ResolveWithSecondaryDNS(ctx, host)
+		return ctx, nil, fmt.Errorf("all DNS sources failed for %s", host)
 	}
 	selected := candidates[0]
 	if r.preferredIP != nil {

@@ -567,9 +567,17 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	}
 	secondaryDNS := config.SecondaryDNS
 	if secondaryDNS == "" || secondaryDNS == "auto" {
-		// This resolver dials directly rather than through the VPN stack. Using
-		// the second policy DNS here would repeat the same failed L3 path.
+		// Keep the server-provided secondary resolver. Some aTrust deployments
+		// publish split-DNS records only on one of their policy DNS servers.
+		// The secondary resolver uses a direct socket, so it also remains useful
+		// when the primary DNS resource's L3/UDP path is temporarily unavailable.
 		secondaryDNS = "114.114.114.114"
+		for _, candidate := range policyDNSServers {
+			if candidate != "" && candidate != remoteDNS {
+				secondaryDNS = candidate
+				break
+			}
+		}
 	}
 	stack, err := gvisor.NewStack(s.client)
 	if err != nil {
