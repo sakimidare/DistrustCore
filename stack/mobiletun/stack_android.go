@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/mythologyli/zju-connect/dial"
@@ -31,6 +32,16 @@ type Stack struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 	dnsHosts  sync.Map
+	udpMu     sync.Mutex
+	udpFlows  map[string]*udpFlow
+}
+
+const udpIdleTimeout = 2 * time.Minute
+
+type udpFlow struct {
+	upstream net.Conn
+	target   M.Socksaddr
+	writeMu  sync.Mutex
 }
 
 func New(fd int, dialer *dial.Dialer, resolver *resolve.Resolver, dnsServer zcdns.LocalServer) (*Stack, error) {
@@ -42,6 +53,7 @@ func New(fd int, dialer *dial.Dialer, resolver *resolve.Resolver, dnsServer zcdn
 		dialer:    dialer,
 		resolver:  resolver,
 		dnsServer: dnsServer,
+		udpFlows:  make(map[string]*udpFlow),
 	}
 	tun2socks.RegisterTCPConnHandler(tcpHandler{stack: s})
 	tun2socks.RegisterUDPConnHandler(udpHandler{stack: s})
@@ -77,6 +89,12 @@ func (s *Stack) Run() error {
 func (s *Stack) Close() {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		s.udpMu.Lock()
+		for key, flow := range s.udpFlows {
+			_ = flow.upstream.Close()
+			delete(s.udpFlows, key)
+		}
+		s.udpMu.Unlock()
 		if s.file != nil {
 			_ = s.file.Close()
 		}
@@ -126,8 +144,7 @@ type udpHandler struct{ stack *Stack }
 
 func (h udpHandler) ReceiveTo(conn tun2socks.UDPConn, payload []byte, target M.Socksaddr) error {
 	if target.Port != 53 {
-		log.Printf("tun2socks UDP dropped: target=%s (only DNS is supported)", target)
-		return nil
+		return h.stack.forwardUDP(conn, payload, target)
 	}
 	request := new(dns.Msg)
 	if err := request.Unpack(payload); err != nil {
@@ -158,4 +175,62 @@ func (h udpHandler) ReceiveTo(conn tun2socks.UDPConn, payload []byte, target M.S
 	}
 	_, err = conn.WriteFrom(packed, target)
 	return err
+}
+
+func (s *Stack) forwardUDP(downstream tun2socks.UDPConn, payload []byte, target M.Socksaddr) error {
+	key := downstream.LocalAddr().String() + "->" + target.String()
+	s.udpMu.Lock()
+	flow := s.udpFlows[key]
+	if flow == nil {
+		ctx := context.Background()
+		if ip := target.Addr; ip.IsValid() {
+			netIP := net.IP(ip.AsSlice())
+			if s.resolver.IPPool != nil {
+				if domain, resources, found := s.resolver.IPPool.GetDomain(netIP); found {
+					ctx = context.WithValue(ctx, resolve.ContextKeyResolveHost, domain)
+					ctx = context.WithValue(ctx, resolve.ContextKeyDomainResource, resources)
+				} else if domain, found := s.dnsHosts.Load(netIP.String()); found {
+					ctx = context.WithValue(ctx, resolve.ContextKeyResolveHost, domain.(string))
+				}
+			}
+		}
+		upstream, err := s.dialer.DialIPPort(ctx, "udp", target.String())
+		if err != nil {
+			s.udpMu.Unlock()
+			return err
+		}
+		flow = &udpFlow{upstream: upstream, target: target}
+		s.udpFlows[key] = flow
+		go s.readUDPFlow(key, flow, downstream)
+		log.Printf("tun2socks UDP flow opened local=%s target=%s", downstream.LocalAddr(), target)
+	}
+	s.udpMu.Unlock()
+	flow.writeMu.Lock()
+	defer flow.writeMu.Unlock()
+	_ = flow.upstream.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+	_, err := flow.upstream.Write(payload)
+	return err
+}
+
+func (s *Stack) readUDPFlow(key string, flow *udpFlow, downstream tun2socks.UDPConn) {
+	defer func() {
+		_ = flow.upstream.Close()
+		s.udpMu.Lock()
+		if s.udpFlows[key] == flow {
+			delete(s.udpFlows, key)
+		}
+		s.udpMu.Unlock()
+		log.Printf("tun2socks UDP flow closed target=%s", flow.target)
+	}()
+	buffer := make([]byte, 65535)
+	for {
+		_ = flow.upstream.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+		n, err := flow.upstream.Read(buffer)
+		if err != nil {
+			return
+		}
+		if _, err = downstream.WriteFrom(buffer[:n], flow.target); err != nil {
+			return
+		}
+	}
 }

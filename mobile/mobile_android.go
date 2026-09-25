@@ -22,8 +22,10 @@ import (
 	"github.com/mythologyli/zju-connect/log"
 	"github.com/mythologyli/zju-connect/resolve"
 	"github.com/mythologyli/zju-connect/service"
+	stackpkg "github.com/mythologyli/zju-connect/stack"
 	"github.com/mythologyli/zju-connect/stack/gvisor"
 	"github.com/mythologyli/zju-connect/stack/mobiletun"
+	"github.com/mythologyli/zju-connect/stack/tcptunnel"
 	"github.com/mythologyli/zju-connect/underlay"
 	"inet.af/netaddr"
 )
@@ -141,6 +143,7 @@ type mobileConfig struct {
 	DialDirectProxy         string            `json:"dialDirectProxy"`
 	DisableKeepAlive        bool              `json:"disableKeepAlive"`
 	KeepAliveURL            string            `json:"keepAliveUrl"`
+	TCPTunnelOnly           bool              `json:"tcpTunnelOnly"`
 	DNSTTL                  int               `json:"dnsTtl"`
 	UpdateBestNodesInterval int               `json:"updateBestNodesInterval"`
 	SessionRefreshInterval  int               `json:"sessionRefreshInterval"`
@@ -666,7 +669,7 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 			remoteDNS, _ = s.client.DNSServer()
 		}
 	}
-	useRemoteDNS := !config.DisableRemoteDNS && remoteDNS != ""
+	useRemoteDNS := !config.DisableRemoteDNS && !config.TCPTunnelOnly && remoteDNS != ""
 	if !useRemoteDNS {
 		log.Printf("mobile policy: remote DNS disabled; using Android/system and direct DNS sources")
 	}
@@ -689,17 +692,28 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 			}
 		}
 	}
-	stack, err := gvisor.NewStack(s.client)
-	if err != nil {
-		return err
+	var policyStack stackpkg.Stack
+	if config.TCPTunnelOnly {
+		if !s.client.CanUseTCPTunnel() {
+			return fmt.Errorf("TCP tunnel is unavailable for this protocol/server")
+		}
+		policyStack, _ = tcptunnel.NewStack(s.client)
+		log.Printf("mobile policy: TCP Tunnel Only enabled")
+	} else {
+		gvisorStack, err := gvisor.NewStack(s.client)
+		if err != nil {
+			return err
+		}
+		s.gvisor = gvisorStack
+		policyStack = gvisorStack
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
-	resolver := resolve.NewResolver(stack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, useRemoteDNS)
+	resolver := resolve.NewResolver(policyStack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, useRemoteDNS)
 	if secondaryPolicyDNS != "" {
 		policyResolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return stack.DialUDP(ctx, &net.UDPAddr{IP: net.ParseIP(secondaryPolicyDNS), Port: 53})
+				return policyStack.DialUDP(ctx, &net.UDPAddr{IP: net.ParseIP(secondaryPolicyDNS), Port: 53})
 			},
 		}
 		resolver.AddLookupSource("policy-secondary", func(ctx context.Context, host string) ([]net.IP, error) {
@@ -761,14 +775,13 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 		log.Printf("custom DNS: %s -> %s", domain, ip)
 	}
 	dnsServer := service.NewDnsServer(resolver, []string{remoteDNS, secondaryDNS})
-	stack.SetupResolve(dnsServer)
-	stack.SetupIPPool(resolver.IPPool)
-	s.gvisor = stack
+	policyStack.SetupResolve(dnsServer)
+	policyStack.SetupIPPool(resolver.IPPool)
 	s.resolver = resolver
 	s.dnsServer = dnsServer
-	go stack.Run()
+	go policyStack.Run()
 
-	s.dialer = dial.NewDialer(stack, resolver, ipResources, config.ProxyAll, config.DialDirectProxy)
+	s.dialer = dial.NewDialer(policyStack, resolver, ipResources, config.ProxyAll, config.DialDirectProxy)
 	if !config.DisableKeepAlive && (config.KeepAliveURL != "" || useRemoteDNS) {
 		keepAliveCtx, cancel := context.WithCancel(context.Background())
 		s.keepAliveCancel = cancel
