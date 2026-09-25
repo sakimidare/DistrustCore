@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -29,6 +30,7 @@ type Stack struct {
 	dnsServer zcdns.LocalServer
 	closed    atomic.Bool
 	closeOnce sync.Once
+	dnsHosts  sync.Map
 }
 
 func New(fd int, dialer *dial.Dialer, resolver *resolve.Resolver, dnsServer zcdns.LocalServer) (*Stack, error) {
@@ -98,6 +100,9 @@ func (h tcpHandler) Handle(downstream net.Conn) error {
 			ctx = context.WithValue(ctx, resolve.ContextKeyResolveHost, domain)
 			ctx = context.WithValue(ctx, resolve.ContextKeyDomainResource, resources)
 			log.Printf("tun2socks restored fakeip=%s domain=%s", ip, domain)
+		} else if domain, found := h.stack.dnsHosts.Load(ip.String()); found {
+			ctx = context.WithValue(ctx, resolve.ContextKeyResolveHost, domain.(string))
+			log.Printf("tun2socks restored DNS host ip=%s domain=%s", ip, domain)
 		}
 	}
 	upstream, err := h.stack.dialer.DialIPPort(ctx, "tcp", target)
@@ -132,6 +137,20 @@ func (h udpHandler) ReceiveTo(conn tun2socks.UDPConn, payload []byte, target M.S
 	response, err := h.stack.dnsServer.HandleDnsMsg(ctx, request)
 	if err != nil {
 		return err
+	}
+	queryHost := ""
+	if len(request.Question) > 0 {
+		queryHost = strings.TrimSuffix(request.Question[0].Name, ".")
+	}
+	for _, answer := range response.Answer {
+		if record, ok := answer.(*dns.A); ok {
+			host := queryHost
+			if host == "" {
+				host = strings.TrimSuffix(record.Hdr.Name, ".")
+			}
+			h.stack.dnsHosts.Store(record.A.String(), host)
+			log.Printf("tun2socks learned DNS context host=%s ip=%s", host, record.A)
+		}
 	}
 	packed, err := response.Pack()
 	if err != nil {

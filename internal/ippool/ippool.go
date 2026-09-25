@@ -108,6 +108,24 @@ func (p *IPPool[T]) GetDomain(ip net.IP) (string, T, bool) {
 	return "", zero, false
 }
 
+func (p *IPPool[T]) Snapshot() map[string]string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make(map[string]string, len(p.domainToIP))
+	for domain, entry := range p.domainToIP {
+		result[domain] = uint32ToIP(entry.ipUint).String()
+	}
+	return result
+}
+
+func (p *IPPool[T]) Clear() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.domainToIP = make(map[string]*entry[T])
+	p.ipToDomain = make(map[uint32]*entry[T])
+	p.currentIP = p.minIP + 2
+}
+
 func uint32ToIP(n uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, n)

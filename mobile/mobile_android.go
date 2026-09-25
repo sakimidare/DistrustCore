@@ -145,6 +145,7 @@ type mobileConfig struct {
 	UpdateBestNodesInterval int               `json:"updateBestNodesInterval"`
 	SessionRefreshInterval  int               `json:"sessionRefreshInterval"`
 	CustomDNS               map[string]string `json:"customDns"`
+	CustomProxyDomains      []string          `json:"customProxyDomains"`
 }
 
 type mobileResult struct {
@@ -434,6 +435,32 @@ func ResourceSnapshot() string {
 	return string(data)
 }
 
+func FakeDNSSnapshot() string {
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess == nil || sess.resolver == nil || sess.resolver.IPPool == nil {
+		return failure("no_active_session", fmt.Errorf("no active FakeDNS pool"))
+	}
+	data, err := json.Marshal(map[string]any{"ok": true, "entries": sess.resolver.IPPool.Snapshot()})
+	if err != nil {
+		return failure("snapshot_failed", err)
+	}
+	return string(data)
+}
+
+func ClearFakeDNS() string {
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess == nil || sess.resolver == nil || sess.resolver.IPPool == nil {
+		return failure("no_active_session", fmt.Errorf("no active FakeDNS pool"))
+	}
+	sess.resolver.IPPool.Clear()
+	log.Printf("FakeDNS mapping cleared")
+	return encodeResult(mobileResult{OK: true})
+}
+
 func parseConfig(value string) (mobileConfig, error) {
 	var config mobileConfig
 	if err := json.Unmarshal([]byte(value), &config); err != nil {
@@ -551,6 +578,13 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 	if config.SkipDomainResource {
 		result.DomainResources = nil
 	}
+	for _, domain := range config.CustomProxyDomains {
+		domain = strings.TrimSpace(strings.ToLower(domain))
+		if domain == "" {
+			continue
+		}
+		result.DomainResources = append(result.DomainResources, domain)
+	}
 	if err = sess.setupPolicy(config); err != nil {
 		sess.close()
 		return nil, mobileResult{}, fmt.Errorf("setup mobile policy engine: %w", err)
@@ -608,6 +642,19 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	if config.SkipDomainResource {
 		domainResources = nil
 		log.Printf("mobile policy: domain resources disabled by user")
+	}
+	if domainResources == nil && len(config.CustomProxyDomains) > 0 {
+		domainResources = make(client.DomainResources)
+	}
+	for _, domain := range config.CustomProxyDomains {
+		domain = strings.TrimSpace(strings.ToLower(domain))
+		if domain == "" {
+			continue
+		}
+		domainResources[domain] = append(domainResources[domain], client.DomainResource{
+			PortMin: 1, PortMax: 65535, Protocol: "all",
+		})
+		log.Printf("mobile policy: custom proxy domain=%s", domain)
 	}
 	dnsResources, _ := s.client.DNSResource()
 	remoteDNS := config.RemoteDNS
