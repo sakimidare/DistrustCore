@@ -2,12 +2,15 @@ package mobile
 
 import (
 	"context"
+	"crypto"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +30,7 @@ import (
 	"github.com/mythologyli/zju-connect/stack/mobiletun"
 	"github.com/mythologyli/zju-connect/stack/tcptunnel"
 	"github.com/mythologyli/zju-connect/underlay"
+	"golang.org/x/crypto/pkcs12"
 	"inet.af/netaddr"
 )
 
@@ -52,6 +56,7 @@ type SessionCallback interface {
 	OnExpired(reason string)
 	OnClientDataUpdated(clientData string)
 	OnHealth(success bool, latencyMillis int64, detail string)
+	OnCorePanic(operation string, message string, stack string)
 }
 
 type callbackLogWriter struct{ callback LogCallback }
@@ -127,6 +132,9 @@ type mobileConfig struct {
 	Username                string            `json:"username"`
 	Password                string            `json:"password"`
 	TOTPSecret              string            `json:"totpSecret"`
+	TwfID                   string            `json:"twfId"`
+	CertificateBase64       string            `json:"certificateBase64"`
+	CertificatePassword     string            `json:"certificatePassword"`
 	AuthType                string            `json:"authType"`
 	LoginDomain             string            `json:"loginDomain"`
 	Phone                   string            `json:"phone"`
@@ -256,14 +264,31 @@ func notifySessionHealth(success bool, latency time.Duration, detail string) {
 	}
 }
 
+func recoverResult(operation string, result *string) {
+	if recovered := recover(); recovered != nil {
+		message := fmt.Sprint(recovered)
+		stack := string(debug.Stack())
+		log.Printf("mobile core panic operation=%s: %s\n%s", operation, message, stack)
+		sessionMu.Lock()
+		callback := sessionCallback
+		sessionMu.Unlock()
+		if callback != nil {
+			callback.OnCorePanic(operation, message, stack)
+		}
+		*result = failure("core_panic", fmt.Errorf("%s panic: %s", operation, message))
+	}
+}
+
 // Capabilities reports only features implemented by this mobile binding.
-func Capabilities() string {
+func Capabilities() (result string) {
+	defer recoverResult("capabilities", &result)
 	return `{"apiVersion":2,"easyConnectVpn":true,"aTrustVpn":true,"localSocks5":true,"localHttp":true,"interactiveAuth":true,"clickCaptcha":true}`
 }
 
 // FetchAuthMethods asks an aTrust server for its advertised authentication
 // domains and methods without starting a VPN session.
-func FetchAuthMethods(server string, port int) string {
+func FetchAuthMethods(server string, port int) (result string) {
+	defer recoverResult("fetch_auth_methods", &result)
 	if strings.TrimSpace(server) == "" {
 		return failure("invalid_config", fmt.Errorf("server is required"))
 	}
@@ -279,11 +304,13 @@ func FetchAuthMethods(server string, port int) string {
 
 // Prepare negotiates a VPN session and returns addresses, routes and DNS as JSON.
 // StartStack must subsequently receive the Android VpnService TUN descriptor.
-func Prepare(configJSON string) string {
+func Prepare(configJSON string) (result string) {
+	defer recoverResult("prepare", &result)
 	return prepare(configJSON, nil)
 }
 
-func PrepareWithCallback(configJSON string, callback ChallengeCallback) string {
+func PrepareWithCallback(configJSON string, callback ChallengeCallback) (result string) {
+	defer recoverResult("prepare_with_callback", &result)
 	return prepare(configJSON, callback)
 }
 
@@ -302,11 +329,13 @@ func prepare(configJSON string, callback ChallengeCallback) string {
 
 // StartProxy starts aTrust/EasyConnect with loopback SOCKS5 and/or HTTP listeners
 // without consuming Android's single VpnService slot.
-func StartProxy(configJSON string) string {
+func StartProxy(configJSON string) (result string) {
+	defer recoverResult("start_proxy", &result)
 	return startProxy(configJSON, nil)
 }
 
-func StartProxyWithCallback(configJSON string, callback ChallengeCallback) string {
+func StartProxyWithCallback(configJSON string, callback ChallengeCallback) (result string) {
+	defer recoverResult("start_proxy_with_callback", &result)
 	return startProxy(configJSON, callback)
 }
 
@@ -353,7 +382,8 @@ func DebugLogin(server string, username string, password string) string {
 	return Login(server, username, password)
 }
 
-func StartStack(fd int) string {
+func StartStack(fd int) (result string) {
+	defer recoverResult("start_stack", &result)
 	sessionMu.Lock()
 	sess := activeSession
 	sessionMu.Unlock()
@@ -396,7 +426,8 @@ func Stop() {
 }
 
 // ResourceSnapshot returns a credential-free view of the active server policy.
-func ResourceSnapshot() string {
+func ResourceSnapshot() (result string) {
+	defer recoverResult("resource_snapshot", &result)
 	sessionMu.Lock()
 	sess := activeSession
 	sessionMu.Unlock()
@@ -448,7 +479,8 @@ func ResourceSnapshot() string {
 	return string(data)
 }
 
-func FakeDNSSnapshot() string {
+func FakeDNSSnapshot() (result string) {
+	defer recoverResult("fake_dns_snapshot", &result)
 	sessionMu.Lock()
 	sess := activeSession
 	sessionMu.Unlock()
@@ -462,7 +494,8 @@ func FakeDNSSnapshot() string {
 	return string(data)
 }
 
-func ClearFakeDNS() string {
+func ClearFakeDNS() (result string) {
+	defer recoverResult("clear_fake_dns", &result)
 	sessionMu.Lock()
 	sess := activeSession
 	sessionMu.Unlock()
@@ -500,6 +533,14 @@ func parseConfig(value string) (mobileConfig, error) {
 	if config.SessionRefreshInterval < 0 {
 		config.SessionRefreshInterval = 1800
 	}
+	if strings.EqualFold(config.Protocol, "easyconnect") && config.TwfID == "" {
+		if strings.TrimSpace(config.Username) == "" {
+			return config, fmt.Errorf("EasyConnect username is required when TwfID is empty")
+		}
+		if config.Password == "" {
+			return config, fmt.Errorf("EasyConnect password is required when TwfID is empty")
+		}
+	}
 	return config, nil
 }
 
@@ -527,9 +568,29 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 
 	switch strings.ToLower(config.Protocol) {
 	case "easyconnect":
+		tlsCert := tls.Certificate{}
+		if config.CertificateBase64 != "" {
+			p12Data, decodeErr := base64.StdEncoding.DecodeString(config.CertificateBase64)
+			if decodeErr != nil {
+				_ = underlayDialer.Close()
+				return nil, mobileResult{}, fmt.Errorf("decode EasyConnect certificate base64: %w", decodeErr)
+			}
+			key, cert, decodeErr := pkcs12.Decode(p12Data, config.CertificatePassword)
+			if decodeErr != nil {
+				_ = underlayDialer.Close()
+				return nil, mobileResult{}, fmt.Errorf("decode EasyConnect PKCS#12 certificate: %w", decodeErr)
+			}
+			privateKey, ok := key.(crypto.PrivateKey)
+			if !ok {
+				_ = underlayDialer.Close()
+				return nil, mobileResult{}, fmt.Errorf("EasyConnect certificate private key has unsupported type %T", key)
+			}
+			tlsCert = tls.Certificate{Certificate: [][]byte{cert.Raw}, PrivateKey: privateKey, Leaf: cert}
+		}
 		vpnClient := easyconnectclient.NewClient(easyconnectclient.Options{
 			Server:           net.JoinHostPort(config.Server, fmt.Sprintf("%d", config.Port)),
-			Auth:             easyconnectclient.AuthOptions{Username: config.Username, Password: config.Password, TOTPSecret: config.TOTPSecret},
+			Auth:             easyconnectclient.AuthOptions{Username: config.Username, Password: config.Password, TOTPSecret: config.TOTPSecret, Certificate: tlsCert},
+			SessionID:        config.TwfID,
 			Resources:        easyconnectclient.ResourceOptions{Fetch: !config.DisableConfig, IncludeDomains: true},
 			UnderlayDialer:   underlayDialer,
 			ChallengeHandler: challengeHandler,
