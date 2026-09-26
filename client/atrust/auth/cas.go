@@ -107,7 +107,7 @@ func (s *Session) cas(callback string) error {
 	if resp.StatusCode != 302 {
 		return fmt.Errorf("invalid status code: %d", resp.StatusCode)
 	}
-	ticket, err := parsePortalTicketFromRedirect(resp.Header.Get("Location"), s.baseHost)
+	ticket, err := parsePortalTicketFromRedirect(resp.Header.Get("Location"), s.baseHost, s.baseScheme)
 	if err != nil {
 		return err
 	}

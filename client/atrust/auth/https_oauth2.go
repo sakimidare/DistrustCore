@@ -115,7 +115,7 @@ func (s *Session) httpsOauth2(callback string) error {
 		return fmt.Errorf("invalid status code: %d", resp.StatusCode)
 	}
 
-	ticket, err := parsePortalTicketFromRedirect(resp.Header.Get("Location"), s.baseHost)
+	ticket, err := parsePortalTicketFromRedirect(resp.Header.Get("Location"), s.baseHost, s.baseScheme)
 	if err != nil {
 		return err
 	}

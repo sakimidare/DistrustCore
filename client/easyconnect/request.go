@@ -62,7 +62,7 @@ func (c *Client) requestTwfID(graphCodeFile string) error {
 
 func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	// First we request the TwfID from server
-	addr := "https://" + c.server + "/por/login_auth.csp?apiversion=1"
+	addr := c.serverURL("/por/login_auth.csp?apiversion=1")
 	log.Printf("Request: %s", addr)
 
 	req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodGet, addr, nil)
@@ -149,7 +149,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 
 	randCode := ""
 	if rndImg == "1" {
-		addr = "https://" + c.server + "/por/rand_code.csp?apiversion=1"
+		addr = c.serverURL("/por/rand_code.csp?apiversion=1")
 		log.Printf("Request: %s", addr)
 		req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodGet, addr, nil)
 		if err != nil {
@@ -183,7 +183,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 		randCode = captchaResponse.Code
 	}
 
-	addr = "https://" + c.server + "/por/login_psw.csp?anti_replay=1&encrypt=1&type=cs"
+	addr = c.serverURL("/por/login_psw.csp?anti_replay=1&encrypt=1&type=cs")
 	log.Printf("Request: %s", addr)
 
 	form := url.Values{
@@ -263,7 +263,7 @@ func requiredXMLValue(data []byte, tag string) (string, error) {
 }
 
 func (c *Client) loginSMS() error {
-	addr := "https://" + c.server + "/por/login_sms.csp?apiversion=1"
+	addr := c.serverURL("/por/login_sms.csp?apiversion=1")
 	log.Printf("SMS request: %s", addr)
 	req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodPost, addr, nil)
 	if err != nil {
@@ -302,7 +302,7 @@ func (c *Client) loginSMS() error {
 	if err != nil {
 		return fmt.Errorf("complete EasyConnect SMS challenge: %w", err)
 	}
-	addr = "https://" + c.server + "/por/login_sms1.csp?apiversion=1"
+	addr = c.serverURL("/por/login_sms1.csp?apiversion=1")
 	log.Printf("SMS Request: %s", addr)
 	form := url.Values{
 		"svpn_inputsms": {codeResponse.Code},
@@ -365,7 +365,7 @@ func (c *Client) loginTOTP() error {
 		return err
 	}
 
-	addr := "https://" + c.server + "/por/login_token.csp"
+	addr := c.serverURL("/por/login_token.csp")
 	log.Printf("TOTP Request: %s", addr)
 	form := url.Values{
 		"svpn_inputtoken": {totpCode},
@@ -408,7 +408,7 @@ func (c *Client) loginTOTP() error {
 }
 
 func (c *Client) loginCert() error {
-	addr := "https://" + c.server + "/com/server.crt"
+	addr := c.serverURL("/com/server.crt")
 	log.Printf("Get server cert: %s", addr)
 	req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodPost, addr, nil)
 	if err != nil {
@@ -445,7 +445,7 @@ func (c *Client) loginCert() error {
 		RootCAs:            caCertPool,
 	})
 
-	addr = "https://" + c.server + "/por/login_cert.csp?anti_replay=1&encrypt=1&type=cs"
+	addr = c.serverURL("/por/login_cert.csp?anti_replay=1&encrypt=1&type=cs")
 	log.Printf("Cert Request: %s", addr)
 	req, err = http.NewRequestWithContext(c.lifecycleCtx, http.MethodPost, addr, nil)
 	if err != nil {
@@ -493,7 +493,7 @@ func (c *Client) loginCert() error {
 }
 
 func (c *Client) requestConfig() (string, error) {
-	addr := "https://" + c.server + "/por/conf.csp"
+	addr := c.serverURL("/por/conf.csp")
 	log.Printf("Request: %s", addr)
 
 	req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodGet, addr, nil)
@@ -578,7 +578,7 @@ func (c *Client) requestUpdateSession(ctx context.Context) error {
 }
 
 func (c *Client) requestResources() (string, error) {
-	addr := "https://" + c.server + "/por/rclist.csp"
+	addr := c.serverURL("/por/rclist.csp")
 	log.Printf("Request: %s", addr)
 
 	req, err := http.NewRequestWithContext(c.lifecycleCtx, http.MethodGet, addr, nil)

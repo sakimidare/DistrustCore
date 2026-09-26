@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type ResourceOptions struct {
 
 type Options struct {
 	Server           string
+	ServerScheme     string
 	Auth             AuthOptions
 	SessionID        string
 	TestMultiLine    bool
@@ -50,6 +52,7 @@ type Options struct {
 
 type Client struct {
 	server            string // Example: rvpn.zju.edu.cn:443. No protocol prefix
+	serverScheme      string
 	username          string
 	password          string
 	totpSecret        string
@@ -95,8 +98,13 @@ func NewClient(options Options) *Client {
 	if challengeHandler == nil {
 		challengeHandler = authchallenge.NewCLIHandler(authchallenge.CLIOptions{})
 	}
+	serverScheme := strings.ToLower(options.ServerScheme)
+	if serverScheme == "" {
+		serverScheme = "https"
+	}
 	c := &Client{
 		server:            options.Server,
+		serverScheme:      serverScheme,
 		username:          options.Auth.Username,
 		password:          options.Auth.Password,
 		totpSecret:        options.Auth.TOTPSecret,
@@ -116,6 +124,10 @@ func NewClient(options Options) *Client {
 	}
 	c.setHTTPTransport(&tls.Config{InsecureSkipVerify: true})
 	return c
+}
+
+func (c *Client) serverURL(path string) string {
+	return c.serverScheme + "://" + c.server + path
 }
 
 // Close releases background resources held by the client. Safe to call
@@ -200,10 +212,11 @@ func (c *Client) Setup() error {
 	if c.underlayDialer == nil {
 		return errors.New("underlay dialer is required")
 	}
-	if c.twfID == "" && c.username == "" {
+	certificatePresent := len(c.tlsCert.Certificate) > 0 && c.tlsCert.PrivateKey != nil
+	if c.twfID == "" && !certificatePresent && c.username == "" {
 		return errors.New("EasyConnect username is required")
 	}
-	if c.twfID == "" && c.password == "" {
+	if c.twfID == "" && !certificatePresent && c.password == "" {
 		return errors.New("EasyConnect password is required")
 	}
 	if err := c.ensureSession(); err != nil {

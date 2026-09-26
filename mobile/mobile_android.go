@@ -128,6 +128,7 @@ func (h callbackChallengeHandler) HandleExternalLogin(challenge authchallenge.Ex
 type mobileConfig struct {
 	Protocol                string            `json:"protocol"`
 	Server                  string            `json:"server"`
+	ServerScheme            string            `json:"serverScheme"`
 	Port                    int               `json:"port"`
 	Username                string            `json:"username"`
 	Password                string            `json:"password"`
@@ -292,6 +293,10 @@ func Capabilities() (result string) {
 // FetchAuthMethods asks an aTrust server for its advertised authentication
 // domains and methods without starting a VPN session.
 func FetchAuthMethods(server string, port int) (result string) {
+	return FetchAuthMethodsWithScheme(server, port, "https")
+}
+
+func FetchAuthMethodsWithScheme(server string, port int, scheme string) (result string) {
 	defer recoverResult("fetch_auth_methods", &result)
 	if strings.TrimSpace(server) == "" {
 		return failure("invalid_config", fmt.Errorf("server is required"))
@@ -299,7 +304,14 @@ func FetchAuthMethods(server string, port int) (result string) {
 	if port == 0 {
 		port = 443
 	}
-	methods, err := atrustclient.GetAuthInfoList(server, port, "", false, "", "")
+	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	if scheme == "" {
+		scheme = "https"
+	}
+	if scheme != "https" && scheme != "http" {
+		return failure("invalid_config", fmt.Errorf("unsupported server scheme %q", scheme))
+	}
+	methods, err := atrustclient.GetAuthInfoListWithScheme(server, port, scheme, "", false, "", "")
 	if err != nil {
 		return failure("auth_discovery_failed", err)
 	}
@@ -522,6 +534,16 @@ func parseConfig(value string) (mobileConfig, error) {
 	if config.Server == "" {
 		return config, fmt.Errorf("server is required")
 	}
+	config.ServerScheme = strings.ToLower(strings.TrimSpace(config.ServerScheme))
+	if config.ServerScheme == "" {
+		config.ServerScheme = "https"
+	}
+	if config.ServerScheme != "https" && config.ServerScheme != "http" {
+		return config, fmt.Errorf("unsupported server scheme %q", config.ServerScheme)
+	}
+	if config.ServerScheme == "http" && config.CertificateBase64 != "" {
+		return config, fmt.Errorf("EasyConnect client certificates require HTTPS")
+	}
 	if config.Port == 0 {
 		config.Port = 443
 	}
@@ -537,7 +559,7 @@ func parseConfig(value string) (mobileConfig, error) {
 	if config.SessionRefreshInterval < 0 {
 		config.SessionRefreshInterval = 1800
 	}
-	if strings.EqualFold(config.Protocol, "easyconnect") && config.TwfID == "" {
+	if strings.EqualFold(config.Protocol, "easyconnect") && config.TwfID == "" && config.CertificateBase64 == "" {
 		if strings.TrimSpace(config.Username) == "" {
 			return config, fmt.Errorf("EasyConnect username is required when TwfID is empty")
 		}
@@ -596,6 +618,7 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 		}
 		vpnClient := easyconnectclient.NewClient(easyconnectclient.Options{
 			Server:           net.JoinHostPort(config.Server, fmt.Sprintf("%d", config.Port)),
+			ServerScheme:     config.ServerScheme,
 			Auth:             easyconnectclient.AuthOptions{Username: config.Username, Password: config.Password, TOTPSecret: config.TOTPSecret, Certificate: tlsCert},
 			SessionID:        config.TwfID,
 			Resources:        easyconnectclient.ResourceOptions{Fetch: !config.DisableConfig, IncludeDomains: true},
@@ -630,7 +653,7 @@ func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSess
 			savedClientData = []byte(config.ClientData)
 		}
 		clientData, err = vpnClient.Setup(atrustclient.SetupOptions{
-			ServerAddress: config.Server, ServerPort: config.Port, LoginMethod: method,
+			ServerAddress: config.Server, ServerScheme: config.ServerScheme, ServerPort: config.Port, LoginMethod: method,
 			TOTPSecret: config.TOTPSecret, ClientData: savedClientData,
 			ChallengeHandler:         challengeHandler,
 			BestNodesRefreshInterval: time.Duration(config.UpdateBestNodesInterval) * time.Second,

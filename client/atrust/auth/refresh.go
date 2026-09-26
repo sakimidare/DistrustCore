@@ -21,7 +21,7 @@ func (s *Session) Restore(deviceID, sid string, cookies []Cookie) {
 		s.client.Jar.SetCookies(&url.URL{Host: cookie.Host, Scheme: cookie.Scheme}, []*http.Cookie{{Name: cookie.Name, Value: cookie.Value, Path: "/"}})
 	}
 	if sid != "" {
-		s.client.Jar.SetCookies(&url.URL{Host: s.baseHost, Scheme: "https"}, []*http.Cookie{{Name: "sid", Value: sid, Path: "/"}})
+		s.client.Jar.SetCookies(&url.URL{Host: s.baseHost, Scheme: s.baseScheme}, []*http.Cookie{{Name: "sid", Value: sid, Path: "/"}})
 	}
 }
 

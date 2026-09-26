@@ -724,14 +724,14 @@ func (s *Session) checkCode() ([]byte, error) {
 	return body, nil
 }
 
-func parsePortalTicketFromRedirect(redirectLocation, baseHost string) (string, error) {
+func parsePortalTicketFromRedirect(redirectLocation, baseHost, baseScheme string) (string, error) {
 	redirectURL, err := url.Parse(redirectLocation)
 	if err != nil {
 		return "", err
 	}
 	log.DebugPrintf("Received redirect: %s", redirectURL.String())
-	if redirectURL.Scheme != "https" {
-		return "", fmt.Errorf("invalid redirect url: scheme not https")
+	if redirectURL.Scheme != baseScheme {
+		return "", fmt.Errorf("invalid redirect url: scheme %q does not match %q", redirectURL.Scheme, baseScheme)
 	}
 	if redirectURL.Host != baseHost {
 		return "", fmt.Errorf("invalid redirect url: host not match")

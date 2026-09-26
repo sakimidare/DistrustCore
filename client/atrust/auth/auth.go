@@ -96,8 +96,9 @@ type Session struct {
 	username   string
 	totpSecret string
 
-	baseHost string
-	baseURL  string
+	baseHost   string
+	baseURL    string
+	baseScheme string
 
 	rid            string
 	env            string
@@ -113,6 +114,14 @@ type Session struct {
 }
 
 func NewSession(server string, tlsKeyLogWriter io.Writer, dialContext ...client.DialContextFunc) *Session {
+	return NewSessionWithScheme(server, "https", tlsKeyLogWriter, dialContext...)
+}
+
+func NewSessionWithScheme(server, scheme string, tlsKeyLogWriter io.Writer, dialContext ...client.DialContextFunc) *Session {
+	scheme = strings.ToLower(strings.TrimSpace(scheme))
+	if scheme == "" {
+		scheme = "https"
+	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -126,11 +135,12 @@ func NewSession(server string, tlsKeyLogWriter io.Writer, dialContext ...client.
 	client := &http.Client{Transport: tr, Jar: jar, Timeout: 20 * time.Second}
 
 	return &Session{
-		client:   client,
-		baseHost: server,
-		baseURL:  "https://" + server,
-		rid:      base64.StdEncoding.EncodeToString([]byte(server)),
-		response: make(map[string]json.RawMessage),
+		client:     client,
+		baseHost:   server,
+		baseURL:    scheme + "://" + server,
+		baseScheme: scheme,
+		rid:        base64.StdEncoding.EncodeToString([]byte(server)),
+		response:   make(map[string]json.RawMessage),
 	}
 }
 
@@ -392,13 +402,13 @@ func (s *Session) Login(method LoginMethod, opts LoginOptions) (LoginResult, err
 func sessionCookies(s *Session) (string, []Cookie) {
 	cookies := make([]Cookie, 0)
 	sid := ""
-	for _, cookie := range s.client.Jar.Cookies(&url.URL{Host: s.baseHost, Scheme: "https"}) {
+	for _, cookie := range s.client.Jar.Cookies(&url.URL{Host: s.baseHost, Scheme: s.baseScheme}) {
 		if cookie.Name == "sid" {
 			sid = cookie.Value
 		}
 		cookies = append(cookies, Cookie{
 			Host:   s.baseHost,
-			Scheme: "https",
+			Scheme: s.baseScheme,
 			Name:   cookie.Name,
 			Value:  cookie.Value,
 		})

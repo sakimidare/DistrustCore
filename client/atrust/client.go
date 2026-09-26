@@ -39,6 +39,7 @@ type ClientOptions struct {
 
 type SetupOptions struct {
 	ServerAddress            string
+	ServerScheme             string
 	ServerPort               int
 	LoginMethod              auth.LoginMethod
 	TOTPSecret               string
@@ -214,6 +215,10 @@ func randHex(n int) string {
 }
 
 func GetAuthInfoList(serverAddress string, serverPort int, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string) (authInfo []auth.AuthInfo, err error) {
+	return GetAuthInfoListWithScheme(serverAddress, serverPort, "https", bindInterface, autoDetectInterface, localDNSServer, debugTLSLogFile)
+}
+
+func GetAuthInfoListWithScheme(serverAddress string, serverPort int, serverScheme, bindInterface string, autoDetectInterface bool, localDNSServer, debugTLSLogFile string) (authInfo []auth.AuthInfo, err error) {
 	var serverHost string
 	if serverPort == 443 {
 		serverHost = serverAddress
@@ -236,7 +241,7 @@ func GetAuthInfoList(serverAddress string, serverPort int, bindInterface string,
 			}
 		}
 	}()
-	sess := auth.NewSession(serverHost, tlsKeyLogWriter, dialer.DialContext)
+	sess := auth.NewSessionWithScheme(serverHost, serverScheme, tlsKeyLogWriter, dialer.DialContext)
 	return sess.GetAuthInfoList()
 }
 
@@ -343,7 +348,7 @@ func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 	} else {
 		authServerHost = fmt.Sprintf("%s:%d", options.ServerAddress, options.ServerPort)
 	}
-	sess := auth.NewSession(authServerHost, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
+	sess := auth.NewSessionWithScheme(authServerHost, options.ServerScheme, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
 	serverVersionInfo, manifestErr := sess.ServerVersionInfo()
 	serverVersionInfo, err := resolveServerVersionInfo(clientAuthData.ServerVersionInfo, serverVersionInfo, manifestErr)
 	if err != nil {
