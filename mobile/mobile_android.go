@@ -264,17 +264,21 @@ func notifySessionHealth(success bool, latency time.Duration, detail string) {
 	}
 }
 
+func notifyCorePanic(operation, message, stack string) {
+	sessionMu.Lock()
+	callback := sessionCallback
+	sessionMu.Unlock()
+	if callback != nil {
+		callback.OnCorePanic(operation, message, stack)
+	}
+}
+
 func recoverResult(operation string, result *string) {
 	if recovered := recover(); recovered != nil {
 		message := fmt.Sprint(recovered)
 		stack := string(debug.Stack())
 		log.Printf("mobile core panic operation=%s: %s\n%s", operation, message, stack)
-		sessionMu.Lock()
-		callback := sessionCallback
-		sessionMu.Unlock()
-		if callback != nil {
-			callback.OnCorePanic(operation, message, stack)
-		}
+		notifyCorePanic(operation, message, stack)
 		*result = failure("core_panic", fmt.Errorf("%s panic: %s", operation, message))
 	}
 }
@@ -546,6 +550,9 @@ func parseConfig(value string) (mobileConfig, error) {
 
 func createSession(config mobileConfig, callback ChallengeCallback) (*mobileSession, mobileResult, error) {
 	log.Init()
+	log.SetPanicHandler(func(scope string, recovered any, stack []byte) {
+		notifyCorePanic(scope, fmt.Sprint(recovered), string(stack))
+	})
 	atrustclient.SetEmbeddedMode(func(err error) {
 		log.Printf("session-expired event: %v", err)
 		notifySessionExpired(err)
@@ -850,13 +857,15 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	policyStack.SetupIPPool(resolver.IPPool)
 	s.resolver = resolver
 	s.dnsServer = dnsServer
-	go policyStack.Run()
+	log.Go("policy_stack", policyStack.Run)
 
 	s.dialer = dial.NewDialer(policyStack, resolver, ipResources, config.ProxyAll, config.DialDirectProxy)
 	if !config.DisableKeepAlive && (config.KeepAliveURL != "" || useRemoteDNS) {
 		keepAliveCtx, cancel := context.WithCancel(context.Background())
 		s.keepAliveCancel = cancel
-		go service.KeepAliveWithStatus(keepAliveCtx, resolver, s.dialer, config.KeepAliveURL, notifySessionHealth)
+		log.Go("keep_alive", func() {
+			service.KeepAliveWithStatus(keepAliveCtx, resolver, s.dialer, config.KeepAliveURL, notifySessionHealth)
+		})
 		log.Printf("mobile keep-alive enabled url=%q", config.KeepAliveURL)
 	}
 	return nil

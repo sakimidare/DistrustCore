@@ -159,15 +159,21 @@ func (p *httpProxy) handleConnect(w http.ResponseWriter, req *http.Request) {
 	log.DebugPrintf("HTTP proxy CONNECT established: %s", req.Host)
 
 	relayDone := make(chan struct{}, 2)
-	go relayHTTPConnect(targetConn, buffered, req.Host, "upstream", relayDone)
-	go relayHTTPConnect(clientConn, targetConn, req.Host, "downstream", relayDone)
+	log.Go("http_proxy_upstream", func() {
+		defer func() { relayDone <- struct{}{} }()
+		relayHTTPConnect(targetConn, buffered, req.Host, "upstream")
+	})
+	log.Go("http_proxy_downstream", func() {
+		defer func() { relayDone <- struct{}{} }()
+		relayHTTPConnect(clientConn, targetConn, req.Host, "downstream")
+	})
 	<-relayDone
 	_ = clientConn.Close()
 	_ = targetConn.Close()
 	<-relayDone
 }
 
-func relayHTTPConnect(dst net.Conn, src io.Reader, host, direction string, done chan<- struct{}) {
+func relayHTTPConnect(dst net.Conn, src io.Reader, host, direction string) {
 	written, err := io.Copy(dst, src)
 	log.DebugPrintf("HTTP proxy CONNECT %s relay ended: %s: %d bytes: %v", direction, host, written, err)
 	if conn, ok := dst.(interface{ CloseWrite() error }); ok {
@@ -176,7 +182,6 @@ func relayHTTPConnect(dst net.Conn, src io.Reader, host, direction string, done 
 	if conn, ok := src.(interface{ CloseRead() error }); ok {
 		_ = conn.CloseRead()
 	}
-	done <- struct{}{}
 }
 
 func (p *httpProxy) registerTunnel(tunnel *httpTunnel) {
@@ -242,11 +247,11 @@ func StartHTTP(bindAddr string, dialer *dial.Dialer) (io.Closer, error) {
 		return nil, err
 	}
 	log.Printf("HTTP server listening on %s", listener.Addr())
-	go func() {
+	log.Go("http_proxy_server", func() {
 		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 			log.Println("HTTP listen failed: " + serveErr.Error())
 		}
-	}()
+	})
 	return &mobileHTTPServer{server: server, proxy: proxy}, nil
 }
 

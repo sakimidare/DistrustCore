@@ -444,7 +444,7 @@ func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 	}
 
 	if options.BestNodesRefreshInterval > 0 {
-		go c.updateBestNodes(c.lifecycleCtx, options.BestNodesRefreshInterval)
+		log.Go("atrust_best_nodes", func() { c.updateBestNodes(c.lifecycleCtx, options.BestNodesRefreshInterval) })
 	}
 
 	return authData, nil

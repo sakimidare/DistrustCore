@@ -5,10 +5,45 @@ import (
 	"io"
 	"log"
 	"os"
+	runtimeDebug "runtime/debug"
+	"sync"
 	"sync/atomic"
 )
 
 var debug atomic.Bool
+var panicHandler struct {
+	sync.RWMutex
+	handler func(string, any, []byte)
+}
+
+func SetPanicHandler(handler func(scope string, recovered any, stack []byte)) {
+	panicHandler.Lock()
+	panicHandler.handler = handler
+	panicHandler.Unlock()
+}
+
+// Go starts a guarded background task. Panics are logged with a full Go stack
+// and forwarded to the embedded host instead of terminating the process.
+func Go(scope string, task func()) {
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				stack := runtimeDebug.Stack()
+				Printf("background panic scope=%s: %v\n%s", scope, recovered, stack)
+				panicHandler.RLock()
+				handler := panicHandler.handler
+				panicHandler.RUnlock()
+				if handler != nil {
+					func() {
+						defer func() { _ = recover() }()
+						handler(scope, recovered, stack)
+					}()
+				}
+			}
+		}()
+		task()
+	}()
+}
 
 func Init() {
 	log.SetOutput(os.Stdout)

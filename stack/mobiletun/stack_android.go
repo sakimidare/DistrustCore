@@ -127,7 +127,7 @@ func (h tcpHandler) Handle(downstream net.Conn) error {
 	if err != nil {
 		return err
 	}
-	go relayTCP(downstream, upstream)
+	log.Go("tun2socks_tcp_relay", func() { relayTCP(downstream, upstream) })
 	return nil
 }
 
@@ -135,8 +135,8 @@ func relayTCP(left, right net.Conn) {
 	defer left.Close()
 	defer right.Close()
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(left, right); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(right, left); done <- struct{}{} }()
+	log.Go("tun2socks_tcp_upstream", func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(left, right) })
+	log.Go("tun2socks_tcp_downstream", func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(right, left) })
 	<-done
 }
 
@@ -201,7 +201,7 @@ func (s *Stack) forwardUDP(downstream tun2socks.UDPConn, payload []byte, target 
 		}
 		flow = &udpFlow{upstream: upstream, target: target}
 		s.udpFlows[key] = flow
-		go s.readUDPFlow(key, flow, downstream)
+		log.Go("tun2socks_udp_flow", func() { s.readUDPFlow(key, flow, downstream) })
 		log.Printf("tun2socks UDP flow opened local=%s target=%s", downstream.LocalAddr(), target)
 	}
 	s.udpMu.Unlock()

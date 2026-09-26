@@ -25,7 +25,7 @@ func (c *Client) setSessionSID(sid string, err error) {
 
 func (c *Client) startSessionRefresh(refresh func(context.Context) (auth.LoginResult, error), data auth.ClientAuthData, save func([]byte) error, interval time.Duration) {
 	c.refreshDone = make(chan struct{})
-	go func() {
+	log.Go("atrust_session_refresh", func() {
 		defer close(c.refreshDone)
 		timer := time.NewTimer(interval)
 		defer timer.Stop()
@@ -72,5 +72,5 @@ func (c *Client) startSessionRefresh(refresh func(context.Context) (auth.LoginRe
 			}
 			timer.Reset(interval)
 		}
-	}()
+	})
 }

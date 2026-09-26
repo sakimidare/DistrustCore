@@ -41,11 +41,11 @@ func StartSocks5(bindAddr string, dialer *dial.Dialer, resolver *resolve.Resolve
 	}
 	server := newSocks5Server(dialer, resolver, user, password)
 	log.Printf("SOCKS5 server listening on %s", listener.Addr())
-	go func() {
+	log.Go("socks5_server", func() {
 		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, net.ErrClosed) {
 			log.Println("SOCKS5 listen failed: " + serveErr.Error())
 		}
-	}()
+	})
 	return listener, nil
 }
 

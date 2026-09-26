@@ -159,7 +159,7 @@ func (t *L3Tunnel) getConn(nodeGroupID string) (*l3TunnelConn, error) {
 	}
 	t.connecting[nodeGroupID] = call
 	t.connsMu.Unlock()
-	go t.connectWithRetry(nodeGroupID, call, true)
+	log.Go("l3_connect_initial", func() { t.connectWithRetry(nodeGroupID, call, true) })
 	return t.waitConnectCall(call)
 }
 
@@ -284,7 +284,7 @@ func (t *L3Tunnel) startReconnect(nodeGroupID string) {
 	call := &l3TunnelConnectCall{done: make(chan struct{})}
 	t.connecting[nodeGroupID] = call
 	t.connsMu.Unlock()
-	go t.connectWithRetry(nodeGroupID, call, false)
+	log.Go("l3_connect_retry", func() { t.connectWithRetry(nodeGroupID, call, false) })
 }
 
 func (t *L3Tunnel) connectWithRetry(nodeGroupID string, call *l3TunnelConnectCall, immediate bool) {
@@ -342,6 +342,6 @@ func (t *L3Tunnel) finishConnect(nodeGroupID string, call *l3TunnelConnectCall, 
 	if err != nil && conn != nil {
 		_ = conn.Close()
 	} else if err == nil {
-		go t.forwardFromConn(nodeGroupID, conn)
+		log.Go("l3_forward", func() { t.forwardFromConn(nodeGroupID, conn) })
 	}
 }

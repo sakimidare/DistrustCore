@@ -5,6 +5,7 @@ import (
 	stdlog "log"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDebugPrintfHonorsEnabledState(t *testing.T) {
@@ -26,5 +27,25 @@ func TestDebugPrintfHonorsEnabledState(t *testing.T) {
 	DebugPrintf("visible %d", 2)
 	if !strings.Contains(output.String(), "visible 2") {
 		t.Fatalf("enabled debug output = %q, want visible message", output.String())
+	}
+}
+
+func TestGoRecoversAndReportsPanic(t *testing.T) {
+	reported := make(chan string, 1)
+	SetPanicHandler(func(scope string, recovered any, stack []byte) {
+		if scope != "test_scope" || len(stack) == 0 {
+			t.Errorf("unexpected panic report scope=%q stack=%d", scope, len(stack))
+		}
+		reported <- recovered.(string)
+	})
+	t.Cleanup(func() { SetPanicHandler(nil) })
+	Go("test_scope", func() { panic("boom") })
+	select {
+	case value := <-reported:
+		if value != "boom" {
+			t.Fatalf("panic value = %q", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("panic was not reported")
 	}
 }

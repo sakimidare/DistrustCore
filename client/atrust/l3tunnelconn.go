@@ -212,9 +212,9 @@ func newL3TunnelConn(ctx context.Context, dialTLS func(context.Context, string, 
 		return nil, err
 	}
 
-	go c.authLoop()
-	go c.readLoop()
-	go c.heartbeatLoop()
+	log.Go("l3_auth", c.authLoop)
+	log.Go("l3_read", c.readLoop)
+	log.Go("l3_heartbeat", c.heartbeatLoop)
 	return c, nil
 }
 
