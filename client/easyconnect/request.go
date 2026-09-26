@@ -74,6 +74,9 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 		debug.PrintStack()
 		return err
 	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("EasyConnect login auth returned HTTP %d", resp.StatusCode)
+	}
 
 	defer func(Body io.ReadCloser) {
 		_ = Body.Close()
@@ -92,10 +95,17 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 		log.Printf("VPN server version: %s", string(vpnMatch[1]))
 	}
 
-	c.twfID = string(regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())[1])
+	twfID, err := requiredXMLValue(buf.Bytes(), "TwfID")
+	if err != nil {
+		return err
+	}
+	c.twfID = twfID
 	log.Printf("TWFID: %s", c.twfID)
 
-	rsaKey := string(regexp.MustCompile(`<RSA_ENCRYPT_KEY>(.*)</RSA_ENCRYPT_KEY>`).FindSubmatch(buf.Bytes())[1])
+	rsaKey, err := requiredXMLValue(buf.Bytes(), "RSA_ENCRYPT_KEY")
+	if err != nil {
+		return err
+	}
 	log.Printf("RSA key: %s", rsaKey)
 
 	rsaExpMatch := regexp.MustCompile(`<RSA_ENCRYPT_EXP>(.*)</RSA_ENCRYPT_EXP>`).FindSubmatch(buf.Bytes())
@@ -131,10 +141,10 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	}
 	encryptedPasswordHex := hex.EncodeToString(encryptedPassword)
 
-	rndImgMatch := regexp.MustCompile(`<RndImg>(.*)</RndImg>`).FindSubmatch(buf.Bytes())[1]
+	rndImgMatch := regexp.MustCompile(`<RndImg>(.*)</RndImg>`).FindSubmatch(buf.Bytes())
 	rndImg := "0"
-	if rndImgMatch != nil {
-		rndImg = string(rndImgMatch)
+	if len(rndImgMatch) > 1 {
+		rndImg = string(rndImgMatch[1])
 	}
 
 	randCode := ""
@@ -242,6 +252,14 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	log.Printf("TWFID has been authorized")
 
 	return nil
+}
+
+func requiredXMLValue(data []byte, tag string) (string, error) {
+	match := regexp.MustCompile(`<` + regexp.QuoteMeta(tag) + `>(.*)</` + regexp.QuoteMeta(tag) + `>`).FindSubmatch(data)
+	if len(match) < 2 || len(match[1]) == 0 {
+		return "", fmt.Errorf("EasyConnect response is missing %s", tag)
+	}
+	return string(match[1]), nil
 }
 
 func (c *Client) loginSMS() error {
@@ -379,7 +397,11 @@ func (c *Client) loginTOTP() error {
 		return errors.New("TOTP verification failed: " + buf.String())
 	}
 
-	c.twfID = string(regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())[1])
+	twfID, err := requiredXMLValue(buf.Bytes(), "TwfID")
+	if err != nil {
+		return err
+	}
+	c.twfID = twfID
 	log.Print("TOTP verification success")
 
 	return nil

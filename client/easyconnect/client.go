@@ -200,6 +200,12 @@ func (c *Client) Setup() error {
 	if c.underlayDialer == nil {
 		return errors.New("underlay dialer is required")
 	}
+	if c.twfID == "" && c.username == "" {
+		return errors.New("EasyConnect username is required")
+	}
+	if c.twfID == "" && c.password == "" {
+		return errors.New("EasyConnect password is required")
+	}
 	if err := c.ensureSession(); err != nil {
 		return err
 	}
