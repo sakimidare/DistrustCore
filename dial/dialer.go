@@ -33,6 +33,7 @@ type Dialer struct {
 	alwaysUseVPN         bool
 	dialDirectHTTPProxy  string // format: "ip:port"
 	dialDirectSocksProxy string // WORKING IN PROCESS
+	hasDirectProxy       bool
 }
 
 // dialDirectIP need have a `hostAddr` parameter, which will be passed to PROXY. But `hostAddr` maybe empty, ipAddr never be empty.
@@ -146,6 +147,13 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 				flowID, resource.IPMin, resource.IPMax, resource.AppID, resource.NodeGroupID, resource.EnableTCPPrefL3,
 			)
 		}
+	}
+
+	// When a downstream proxy is configured, unmatched traffic is handed to
+	// that proxy instead of being forced through the sangfor tunnel. The proxy
+	// dials a normal socket, so it is not subject to the tunnel ACL below.
+	if d.hasDirectProxy && !matchedResource {
+		useVPN = false
 	}
 
 	// Client-side ACL enforcement: if alwaysUseVPN forced VPN routing for a
@@ -266,5 +274,6 @@ func NewDialer(stack stack.Stack, resolver *resolve.Resolver, ipResources []clie
 		alwaysUseVPN:         alwaysUseVPN,
 		dialDirectHTTPProxy:  dialHttpProxy,
 		dialDirectSocksProxy: dialSocksProxy,
+		hasDirectProxy:       dialHttpProxy != "" || dialSocksProxy != "",
 	}
 }
