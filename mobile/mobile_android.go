@@ -810,6 +810,10 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 	}
 	log.Printf("mobile proxy DNS primary=%s secondary=%s", remoteDNS, secondaryDNS)
 	resolver := resolve.NewResolver(policyStack, remoteDNS, secondaryDNS, uint64(config.DNSTTL), domainResources, dnsResources, useRemoteDNS)
+	serverLabels := strings.Split(strings.TrimSuffix(strings.ToLower(config.Server), "."), ".")
+	if len(serverLabels) >= 3 {
+		resolver.SetPolicyDomainSuffix(strings.Join(serverLabels[1:], "."))
+	}
 	if secondaryPolicyDNS != "" {
 		policyResolver := &net.Resolver{
 			PreferGo: true,

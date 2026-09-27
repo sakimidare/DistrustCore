@@ -18,19 +18,20 @@ import (
 )
 
 type Resolver struct {
-	remoteUDPResolver *net.Resolver
-	remoteTCPResolver *net.Resolver
-	secondaryResolver *net.Resolver
-	ttl               uint64
-	domainIndex       *domainResourceIndex
-	dnsResource       map[string][]net.IP
-	dnsResourceCursor sync.Map
-	useRemoteDNS      bool
-	externalLookup    func(context.Context, string) ([]net.IP, error)
-	additionalLookups []candidateLookup
-	historyLookup     func(string) []net.IP
-	successRecorder   func(string, net.IP)
-	preferredIP       func(net.IP) bool
+	remoteUDPResolver  *net.Resolver
+	remoteTCPResolver  *net.Resolver
+	secondaryResolver  *net.Resolver
+	ttl                uint64
+	domainIndex        *domainResourceIndex
+	dnsResource        map[string][]net.IP
+	dnsResourceCursor  sync.Map
+	useRemoteDNS       bool
+	externalLookup     func(context.Context, string) ([]net.IP, error)
+	additionalLookups  []candidateLookup
+	historyLookup      func(string) []net.IP
+	successRecorder    func(string, net.IP)
+	preferredIP        func(net.IP) bool
+	policyDomainSuffix string
 
 	dnsCache *cache.Cache
 
@@ -50,6 +51,7 @@ type Resolver struct {
 
 const remoteDNSTCPFallbackDelay = 300 * time.Millisecond
 const candidatePreferenceWindow = 250 * time.Millisecond
+const policyDomainPreferenceWindow = 4 * time.Second
 const candidateLookupTimeout = 4 * time.Second
 
 type lookupIPFunc func(context.Context, string, string) ([]net.IP, error)
@@ -244,7 +246,12 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (resCtx context.Con
 			results <- candidateLookupResult{source: extra.source, ips: ips, err: err}
 		}()
 	}
-	timer := time.NewTimer(candidatePreferenceWindow)
+	preferenceWindow := candidatePreferenceWindow
+	if r.policyDomainSuffix != "" && (host == r.policyDomainSuffix || strings.HasSuffix(host, "."+r.policyDomainSuffix)) {
+		preferenceWindow = policyDomainPreferenceWindow
+		log.Printf("flow=%d dns policy-domain preference host=%s suffix=%s window=%s", flowID, host, r.policyDomainSuffix, preferenceWindow)
+	}
+	timer := time.NewTimer(preferenceWindow)
 	defer timer.Stop()
 	timerC := timer.C
 	completed := 0
@@ -347,6 +354,10 @@ func (r *Resolver) AddLookupSource(source string, lookup func(context.Context, s
 
 func (r *Resolver) SetPreferredIP(match func(net.IP) bool) {
 	r.preferredIP = match
+}
+
+func (r *Resolver) SetPolicyDomainSuffix(suffix string) {
+	r.policyDomainSuffix = normalizeHostname(suffix)
 }
 
 func (r *Resolver) SetHistoryLookup(lookup func(string) []net.IP) {
