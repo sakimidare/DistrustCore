@@ -35,6 +35,18 @@ type Dialer struct {
 	dialDirectSocksProxy string // WORKING IN PROCESS
 }
 
+// DirectProxyAddress reports the configured downstream proxy, if any. It is
+// used for diagnostics only and does not change routing.
+func (d *Dialer) DirectProxyAddress() string {
+	if d.dialDirectHTTPProxy != "" {
+		return "http://" + d.dialDirectHTTPProxy
+	}
+	if d.dialDirectSocksProxy != "" {
+		return "socks5://" + d.dialDirectSocksProxy
+	}
+	return ""
+}
+
 // dialDirectIP need have a `hostAddr` parameter, which will be passed to PROXY. But `hostAddr` maybe empty, ipAddr never be empty.
 func (d *Dialer) dialDirectIP(ctx context.Context, network, ipAddr string, hostAddr string) (net.Conn, error) {
 	// only support http proxy now and tcp network type
@@ -157,7 +169,10 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 	// we have no whitelist to enforce. An empty but non-nil slice still means
 	// resources were parsed and no IP destinations are allowed.
 	if useVPN && !matchedResource && d.ipResources != nil {
-		log.Printf("flow=%d decision=DENY reason=acl target=%s network=%s", flowID, ipAddr, network)
+		log.Printf(
+			"flow=%d decision=DENY reason=acl target=%s network=%s directProxy=%q",
+			flowID, ipAddr, network, d.DirectProxyAddress(),
+		)
 		return nil, ErrACLDenied
 	}
 
@@ -188,7 +203,15 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 			return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 		}
 	} else {
-		log.Printf("flow=%d decision=DIRECT target=%s network=%s host=%s", flowID, ipAddr, network, hostAddr)
+		proxy := d.DirectProxyAddress()
+		if proxy == "" {
+			log.Printf("flow=%d decision=DIRECT target=%s network=%s host=%s directProxy=none", flowID, ipAddr, network, hostAddr)
+		} else {
+			log.Printf(
+				"flow=%d decision=DIRECT target=%s network=%s host=%s directProxy=%q note=flow-reached-dialer",
+				flowID, ipAddr, network, hostAddr, proxy,
+			)
+		}
 		return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 	}
 }
