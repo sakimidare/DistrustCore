@@ -392,6 +392,24 @@ func main() {
 		log.Printf("DNS: policy domain suffix %s", suffix)
 	}
 
+	// The secondary policy DNS is also a server-issued resource, so query it
+	// through the tunnel instead of dialing it directly. Off-campus the direct
+	// query is refused (it only answers campus clients), while the tunnel query
+	// resolves campus domains correctly.
+	if len(policyDNSServers) > 1 {
+		secondaryPolicyDNS := policyDNSServers[1]
+		policyResolver := &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return vpnStack.DialUDP(ctx, &net.UDPAddr{IP: net.ParseIP(secondaryPolicyDNS), Port: 53})
+			},
+		}
+		vpnResolver.AddLookupSource("policy-secondary", func(ctx context.Context, host string) ([]net.IP, error) {
+			return policyResolver.LookupIP(ctx, "ip4", host)
+		})
+		log.Printf("DNS: policy-secondary lookup via tunnel %s", secondaryPolicyDNS)
+	}
+
 	for _, customDns := range conf.CustomDNSList {
 		ipAddr := net.ParseIP(customDns.IP)
 		if ipAddr == nil {
