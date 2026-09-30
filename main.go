@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -359,6 +360,37 @@ func main() {
 		vpnResolver.Close()
 		return nil
 	})
+
+	// Resource-aware candidate selection: when several DNS sources return
+	// different addresses (for example a public resolver returning a WAF IP and
+	// the policy DNS returning the real one), prefer the address that matches a
+	// server-issued IP resource so it is routed through the tunnel.
+	if ipSet != nil {
+		vpnResolver.SetPreferredIP(func(ip net.IP) bool {
+			parsed, parseErr := netaddr.ParseIP(ip.String())
+			return parseErr == nil && ipSet.Contains(parsed)
+		})
+		log.Println("DNS: resource-aware candidate selection enabled")
+	}
+
+	// Add the operating system resolver as an extra concurrent candidate. This
+	// mirrors the mobile behaviour and only runs outside TUN mode, where the
+	// system resolver is the physical network DNS and cannot recurse into us.
+	if !conf.TUNMode {
+		systemResolver := &net.Resolver{}
+		vpnResolver.SetExternalLookup(func(ctx context.Context, host string) ([]net.IP, error) {
+			return systemResolver.LookupIP(ctx, "ip4", host)
+		})
+		log.Println("DNS: system resolver added as concurrent candidate")
+	}
+
+	// Campus domains deserve a longer preference window than public ones.
+	serverLabels := strings.Split(strings.TrimSuffix(strings.ToLower(conf.ServerAddress), "."), ".")
+	if len(serverLabels) >= 3 {
+		suffix := strings.Join(serverLabels[1:], ".")
+		vpnResolver.SetPolicyDomainSuffix(suffix)
+		log.Printf("DNS: policy domain suffix %s", suffix)
+	}
 
 	for _, customDns := range conf.CustomDNSList {
 		ipAddr := net.ParseIP(customDns.IP)
