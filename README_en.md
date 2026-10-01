@@ -1,5 +1,44 @@
 # ZJU Connect
 
+> [!IMPORTANT]
+> This repository is **[sakimidare/DistrustCore](https://github.com/sakimidare/DistrustCore)**, a fork of
+> [Mythologyli/zju-connect](https://github.com/Mythologyli/zju-connect).
+> It serves as the core of **[Distrust](https://github.com/sakimidare/Distrust)**, used by both the
+> Android client and the desktop client (EZ4Connect).
+
+## Differences from upstream
+
+The main additions target **resolving campus domains while off campus**:
+
+- **Multi-source concurrent DNS**: policy DNS, `policy-secondary` (the second policy DNS), system DNS, previously successful addresses, and custom DNS are queried concurrently;
+- **Server-resource awareness**: when sources disagree, the address matching a server-issued IP resource is preferred, avoiding public WAF addresses;
+- **`policy-secondary` (second policy DNS over the tunnel)**: fixes the inability to resolve campus domains off campus. For some universities (e.g. SEU), the first policy DNS is unreachable off campus, and only the second policy DNS queried over the tunnel returns the correct address;
+- **Desktop CLI**: `main.go` enables the same multi-source and resource-aware policy as Android;
+- Other: structured logging and session callbacks, background goroutine panic wrapping, a synchronous gomobile entry point, etc.
+
+## Build
+
+```bash
+# Desktop (current platform)
+go build -ldflags "-X main.zjuConnectVersion=v1.3.1-distrust" -o zju-connect .
+
+# Desktop (Windows cross-compile)
+GOOS=windows GOARCH=amd64 go build -ldflags "-X main.zjuConnectVersion=v1.3.1-distrust" -o zju-connect.exe .
+
+# Android (gomobile, produces an AAR)
+gomobile bind -target=android -androidapi 26 -o distrust-core.aar ./mobile
+```
+
+## Sync with upstream
+
+```bash
+git remote add upstream https://github.com/Mythologyli/zju-connect.git
+git fetch upstream
+git merge upstream/main
+```
+
+---
+
 > 🚫 **Disclaimer**
 >
 > This program is provided **as is**, and the author **does not guarantee the correctness or reliability of the program**. Please judge whether the specific scenario is suitable for using this program. **The problems or consequences caused by using this program are borne by the user**!
