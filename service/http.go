@@ -86,6 +86,7 @@ func newHTTPHandler(dialer *dial.Dialer) http.Handler {
 }
 
 func (p *httpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	log.Printf("ingress=local-http method=%s target=%s host=%s", req.Method, req.URL.String(), req.Host)
 	if req.Method == http.MethodConnect {
 		p.handleConnect(w, req)
 		return

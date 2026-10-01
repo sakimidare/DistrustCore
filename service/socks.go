@@ -15,6 +15,10 @@ import (
 )
 
 func newSocks5Server(dialer *dial.Dialer, resolver *resolve.Resolver, user string, password string) *socks5.Server {
+	loggedDial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		log.Printf("ingress=local-socks protocol=%s target=%s", network, address)
+		return dialer.DialIPPort(ctx, network, address)
+	}
 	var authMethods []socks5.Authenticator
 	if user != "" && password != "" {
 		authMethods = append(authMethods, socks5.UserPassAuthenticator{
@@ -27,7 +31,7 @@ func newSocks5Server(dialer *dial.Dialer, resolver *resolve.Resolver, user strin
 	return socks5.NewServer(
 		socks5.WithAuthMethods(authMethods),
 		socks5.WithResolver(resolver),
-		socks5.WithDial(dialer.DialIPPort),
+		socks5.WithDial(loggedDial),
 		socks5.WithLogger(socks5.NewLogger(log.NewLogger("[SOCKS5] "))),
 	)
 }

@@ -185,9 +185,11 @@ type mobileSession struct {
 	dialer          *dial.Dialer
 	dnsServer       service.DNSServer
 	servers         []io.Closer
+	proxyMu         sync.Mutex
 	tunStack        *mobiletun.Stack
 	keepAliveCancel context.CancelFunc
 	mu              sync.Mutex
+	closed          bool
 }
 
 type snapshotIPResource struct {
@@ -355,6 +357,52 @@ func StartProxyWithCallback(configJSON string, callback ChallengeCallback) (resu
 	return startProxy(configJSON, callback)
 }
 
+// StartProxyFrontend attaches loopback proxy listeners to the active shared
+// session without logging in again or replacing the TUN frontend.
+func StartProxyFrontend(configJSON string) (result string) {
+	defer recoverResult("start_proxy_frontend", &result)
+	config, err := parseConfig(configJSON)
+	if err != nil {
+		return failure("invalid_config", err)
+	}
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess == nil {
+		return failure("no_active_session", fmt.Errorf("no active session"))
+	}
+	response := mobileResult{OK: true}
+	if err = sess.startProxy(config, &response); err != nil {
+		return failure("proxy_start_failed", err)
+	}
+	return encodeResult(response)
+}
+
+func StopProxyFrontend() {
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess != nil {
+		sess.stopProxy()
+	}
+}
+
+func StopStack() {
+	sessionMu.Lock()
+	sess := activeSession
+	sessionMu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.mu.Lock()
+	stack := sess.tunStack
+	sess.tunStack = nil
+	sess.mu.Unlock()
+	if stack != nil {
+		stack.Close()
+	}
+}
+
 func startProxy(configJSON string, callback ChallengeCallback) string {
 	config, err := parseConfig(configJSON)
 	if err != nil {
@@ -415,6 +463,11 @@ func StartStack(fd int) (result string) {
 		return failure("tun_start_failed", err)
 	}
 	sess.mu.Lock()
+	if sess.closed {
+		sess.mu.Unlock()
+		stack.Close()
+		return failure("session_closed", fmt.Errorf("session closed while starting TUN"))
+	}
 	sess.tunStack = stack
 	sess.mu.Unlock()
 	runErr := stack.Run()
@@ -718,6 +771,11 @@ func negotiatedResult(vpnClient client.Client) (mobileResult, error) {
 }
 
 func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) error {
+	s.proxyMu.Lock()
+	defer s.proxyMu.Unlock()
+	if len(s.servers) != 0 {
+		return fmt.Errorf("proxy frontend already started")
+	}
 	if s.dialer == nil || s.resolver == nil {
 		return fmt.Errorf("policy engine is not ready")
 	}
@@ -738,6 +796,16 @@ func (s *mobileSession) startProxy(config mobileConfig, result *mobileResult) er
 		result.HTTPAddress = config.HTTPBind
 	}
 	return nil
+}
+
+func (s *mobileSession) stopProxy() {
+	s.proxyMu.Lock()
+	servers := s.servers
+	s.servers = nil
+	s.proxyMu.Unlock()
+	for _, server := range servers {
+		_ = server.Close()
+	}
 }
 
 func (s *mobileSession) setupPolicy(config mobileConfig) error {
@@ -899,25 +967,31 @@ func (s *mobileSession) setupPolicy(config mobileConfig) error {
 }
 
 func (s *mobileSession) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	activeTunStack := s.tunStack
+	s.tunStack = nil
+	s.mu.Unlock()
+
 	if s.keepAliveCancel != nil {
 		s.keepAliveCancel()
 		s.keepAliveCancel = nil
 	}
-	for _, server := range s.servers {
-		_ = server.Close()
+	s.stopProxy()
+	// Stop and fully drain the native lwIP data plane before closing the
+	// resolver, policy stack, client or underlay that its handlers use.
+	if activeTunStack != nil {
+		activeTunStack.Close()
 	}
 	if s.resolver != nil {
 		s.resolver.Close()
 	}
 	if s.gvisor != nil {
 		s.gvisor.Close()
-	}
-	s.mu.Lock()
-	activeTunStack := s.tunStack
-	s.tunStack = nil
-	s.mu.Unlock()
-	if activeTunStack != nil {
-		activeTunStack.Close()
 	}
 	if closer, ok := s.client.(interface{ Close() }); ok {
 		closer.Close()

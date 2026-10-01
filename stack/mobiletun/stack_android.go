@@ -24,16 +24,20 @@ import (
 )
 
 type Stack struct {
-	file      *os.File
-	lwip      tun2socks.LWIPStack
-	dialer    *dial.Dialer
-	resolver  *resolve.Resolver
-	dnsServer zcdns.LocalServer
-	closed    atomic.Bool
-	closeOnce sync.Once
-	dnsHosts  sync.Map
-	udpMu     sync.Mutex
-	udpFlows  map[string]*udpFlow
+	file       *os.File
+	lwip       tun2socks.LWIPStack
+	dialer     *dial.Dialer
+	resolver   *resolve.Resolver
+	dnsServer  zcdns.LocalServer
+	closed     atomic.Bool
+	closeOnce  sync.Once
+	runDone    chan struct{}
+	runStarted atomic.Bool
+	runOnce    sync.Once
+	lwipMu     sync.RWMutex
+	dnsHosts   sync.Map
+	udpMu      sync.Mutex
+	udpFlows   map[string]*udpFlow
 }
 
 const udpIdleTimeout = 2 * time.Minute
@@ -54,6 +58,7 @@ func New(fd int, dialer *dial.Dialer, resolver *resolve.Resolver, dnsServer zcdn
 		resolver:  resolver,
 		dnsServer: dnsServer,
 		udpFlows:  make(map[string]*udpFlow),
+		runDone:   make(chan struct{}),
 	}
 	tun2socks.RegisterTCPConnHandler(tcpHandler{stack: s})
 	tun2socks.RegisterUDPConnHandler(udpHandler{stack: s})
@@ -68,6 +73,8 @@ func New(fd int, dialer *dial.Dialer, resolver *resolve.Resolver, dnsServer zcdn
 }
 
 func (s *Stack) Run() error {
+	s.runStarted.Store(true)
+	defer s.runOnce.Do(func() { close(s.runDone) })
 	buffer := make([]byte, 65535)
 	for {
 		n, err := s.file.Read(buffer)
@@ -80,7 +87,14 @@ func (s *Stack) Run() error {
 		if n == 0 {
 			continue
 		}
-		if _, err = s.lwip.Write(buffer[:n]); err != nil && !s.closed.Load() {
+		s.lwipMu.RLock()
+		if s.closed.Load() {
+			s.lwipMu.RUnlock()
+			return nil
+		}
+		_, err = s.lwip.Write(buffer[:n])
+		s.lwipMu.RUnlock()
+		if err != nil && !s.closed.Load() {
 			log.Printf("tun2socks input dropped: %v", err)
 		}
 	}
@@ -98,9 +112,19 @@ func (s *Stack) Close() {
 		if s.file != nil {
 			_ = s.file.Close()
 		}
+		// Closing the TUN descriptor wakes Run. Do not tear down lwIP while
+		// Run may still be inside Write: lwIP PCB destruction is not safe
+		// against concurrent packet input.
+		if s.runStarted.Load() {
+			<-s.runDone
+		} else {
+			s.runOnce.Do(func() { close(s.runDone) })
+		}
+		s.lwipMu.Lock()
 		if s.lwip != nil {
 			_ = s.lwip.Close()
 		}
+		s.lwipMu.Unlock()
 	})
 }
 
@@ -108,6 +132,7 @@ type tcpHandler struct{ stack *Stack }
 
 func (h tcpHandler) Handle(downstream net.Conn) error {
 	target := downstream.RemoteAddr().String()
+	log.Printf("ingress=vpn protocol=tcp target=%s", target)
 	ctx := context.Background()
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
@@ -143,6 +168,7 @@ func relayTCP(left, right net.Conn) {
 type udpHandler struct{ stack *Stack }
 
 func (h udpHandler) ReceiveTo(conn tun2socks.UDPConn, payload []byte, target M.Socksaddr) error {
+	log.Printf("ingress=vpn protocol=udp target=%s bytes=%d", target, len(payload))
 	if target.Port != 53 {
 		return h.stack.forwardUDP(conn, payload, target)
 	}
