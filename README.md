@@ -1,5 +1,44 @@
 # ZJU Connect
 
+> [!IMPORTANT]
+> 本仓库是 **[sakimidare/DistrustCore](https://github.com/sakimidare/DistrustCore)**，即
+> [Mythologyli/zju-connect](https://github.com/Mythologyli/zju-connect) 的衍生分支。
+> 它作为 **[Distrust](https://github.com/sakimidare/Distrust)** 的核心，供该项目的
+> Android 客户端与桌面客户端（EZ4Connect）使用。
+
+## 与上游的差异
+
+主要补充了**校外访问校园网**时的 DNS 解析能力：
+
+- **多来源并发 DNS**：策略 DNS、`policy-secondary`（第二个策略 DNS）、系统 DNS、历史成功地址、自定义 DNS 同时查询；
+- **服务端资源感知**：多个来源返回不同地址时，优先选择命中服务端下发 IP Resource 的地址，避免解析到公网 WAF 地址；
+- **`policy-secondary`（经隧道查询第二策略 DNS）**：修复校外**无法解析校园域名**的问题。部分学校（如 SEU）的第一个策略 DNS 校外不可直达，只有经隧道查询第二个策略 DNS 才能得到正确地址；
+- **桌面 CLI**：`main.go` 启用与 Android 端一致的多来源与资源感知策略；
+- 其它：结构化日志与会话回调、后台 goroutine panic 封装、面向 gomobile 的同步入口等。
+
+## 构建
+
+```bash
+# 桌面（当前平台）
+go build -ldflags "-X main.zjuConnectVersion=v1.3.1-distrust" -o zju-connect .
+
+# 桌面（Windows 交叉编译）
+GOOS=windows GOARCH=amd64 go build -ldflags "-X main.zjuConnectVersion=v1.3.1-distrust" -o zju-connect.exe .
+
+# Android（gomobile，输出 AAR）
+gomobile bind -target=android -androidapi 26 -o distrust-core.aar ./mobile
+```
+
+## 同步上游
+
+```bash
+git remote add upstream https://github.com/Mythologyli/zju-connect.git
+git fetch upstream
+git merge upstream/main
+```
+
+---
+
 > 🚫 **免责声明**
 >
 > 本程序**按原样提供**，作者**不对程序的正确性或可靠性提供保证**，请使用者自行判断具体场景是否适合使用该程序，**使用该程序造成的问题或后果由使用者自行承担**！
