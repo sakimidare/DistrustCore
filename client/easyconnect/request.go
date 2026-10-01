@@ -663,7 +663,7 @@ func (c *Client) requestToken() error {
 func (c *Client) requestIP() error {
 	ctx, cancel := c.rawRequestContext()
 	defer cancel()
-	conn, err := c.tlsConn(ctx)
+	conn, err := c.tlsConn(ctx, "L3IP")
 	if err != nil {
 		return err
 	}
